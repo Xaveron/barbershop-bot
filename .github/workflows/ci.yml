@@ -31,7 +31,7 @@ jobs:
           --health-retries 10
 
     env:
-      BOT_TOKEN: "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN || '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw' }}
       DATABASE_URL: "postgresql+asyncpg://barber:barber@localhost:5432/barbershop"
       TEST_DATABASE_URL: "postgresql+asyncpg://barber:barber@localhost:5432/barbershop"
       ADMIN_ID: "1"
