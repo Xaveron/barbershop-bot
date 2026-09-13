@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Lint & Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: barber
+          POSTGRES_PASSWORD: barber
+          POSTGRES_DB: barbershop
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U barber -d barbershop"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      BOT_TOKEN: "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+      DATABASE_URL: "postgresql+asyncpg://barber:barber@localhost:5432/barbershop"
+      TEST_DATABASE_URL: "postgresql+asyncpg://barber:barber@localhost:5432/barbershop"
+      ADMIN_ID: "1"
+      TIMEZONE: "Europe/Chisinau"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Apply migrations
+        run: alembic upgrade head
+
+      - name: Run tests
+        run: pytest --tb=short -q
