@@ -7,6 +7,7 @@
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)
 ![Ruff](https://img.shields.io/badge/linter-ruff-D7FF64?logo=ruff&logoColor=black)
 ![Tests](https://img.shields.io/badge/tests-236%20passed-brightgreen?logo=pytest&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 Telegram-бот для барбершопа: онлайн-запись клиентов и админ-панель прямо в чате.
 
