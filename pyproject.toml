@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "barbershop-bot"
+version = "1.0.0"
+description = "Production-ready Telegram bot for a barbershop (aiogram 3 + PostgreSQL)"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.13,<4",
+    "SQLAlchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29",
+    "alembic>=1.16",  # path_separator в alembic.ini поддерживается с 1.16
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "APScheduler>=3.10,<4",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "ASYNC", "RUF"]
+ignore = ["B008", "RUF001", "RUF002", "RUF003", "RUF012"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/database/migrations/*" = ["E501"]
+"tests/*" = ["E501"]

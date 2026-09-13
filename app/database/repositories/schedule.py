@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import uuid
+from datetime import date, time
+
+from sqlalchemy import or_, select
+
+from app.database.models import ScheduleException, WorkingSchedule
+from app.database.repositories.base import BaseRepository
+
+
+class ScheduleRepository(BaseRepository):
+    # --- Недельный график ---------------------------------------------------
+    async def list_week(self, barber_id: uuid.UUID) -> list[WorkingSchedule]:
+        stmt = (
+            select(WorkingSchedule)
+            .where(WorkingSchedule.barber_id == barber_id)
+            .order_by(WorkingSchedule.weekday)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def get_day(self, barber_id: uuid.UUID, weekday: int) -> WorkingSchedule | None:
+        stmt = select(WorkingSchedule).where(
+            WorkingSchedule.barber_id == barber_id,
+            WorkingSchedule.weekday == weekday,
+        )
+        return await self.session.scalar(stmt)
+
+    async def set_day(
+        self, barber_id: uuid.UUID, weekday: int, start: time, end: time
+    ) -> WorkingSchedule:
+        record = await self.get_day(barber_id, weekday)
+        if record is None:
+            record = WorkingSchedule(
+                barber_id=barber_id, weekday=weekday, start_time=start, end_time=end
+            )
+            self.session.add(record)
+        else:
+            record.start_time = start
+            record.end_time = end
+        await self.session.flush()
+        return record
+
+    async def clear_day(self, barber_id: uuid.UUID, weekday: int) -> bool:
+        record = await self.get_day(barber_id, weekday)
+        if record is None:
+            return False
+        await self.session.delete(record)
+        await self.session.flush()
+        return True
+
+    # --- Исключения ---------------------------------------------------------
+    async def get_exception(self, exception_id: uuid.UUID) -> ScheduleException | None:
+        return await self.session.get(ScheduleException, exception_id)
+
+    async def list_exceptions(
+        self,
+        *,
+        barber_id: uuid.UUID | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        include_global: bool = True,
+    ) -> list[ScheduleException]:
+        stmt = select(ScheduleException)
+        if barber_id is not None:
+            condition = ScheduleException.barber_id == barber_id
+            if include_global:
+                condition = or_(condition, ScheduleException.barber_id.is_(None))
+            stmt = stmt.where(condition)
+        if date_from is not None:
+            stmt = stmt.where(ScheduleException.exception_date >= date_from)
+        if date_to is not None:
+            stmt = stmt.where(ScheduleException.exception_date <= date_to)
+        stmt = stmt.order_by(ScheduleException.exception_date)
+        return list(await self.session.scalars(stmt))
+
+    async def upsert_exception(
+        self,
+        *,
+        barber_id: uuid.UUID | None,
+        exception_date: date,
+        is_day_off: bool,
+        start_time: time | None = None,
+        end_time: time | None = None,
+        reason: str | None = None,
+    ) -> ScheduleException:
+        existing = await self._find_exception(barber_id, exception_date)
+        if existing is None:
+            existing = ScheduleException(barber_id=barber_id, exception_date=exception_date)
+            self.session.add(existing)
+        existing.is_day_off = is_day_off
+        existing.start_time = None if is_day_off else start_time
+        existing.end_time = None if is_day_off else end_time
+        existing.reason = reason
+        await self.session.flush()
+        return existing
+
+    async def delete_exception(self, exception: ScheduleException) -> None:
+        await self.session.delete(exception)
+        await self.session.flush()
+
+    async def _find_exception(
+        self, barber_id: uuid.UUID | None, exception_date: date
+    ) -> ScheduleException | None:
+        stmt = select(ScheduleException).where(ScheduleException.exception_date == exception_date)
+        stmt = stmt.where(
+            ScheduleException.barber_id.is_(None)
+            if barber_id is None
+            else ScheduleException.barber_id == barber_id
+        )
+        return await self.session.scalar(stmt)
