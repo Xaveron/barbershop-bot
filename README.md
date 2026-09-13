@@ -1,5 +1,12 @@
 # 💈 Barbershop Bot
 
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![aiogram](https://img.shields.io/badge/aiogram-3-2CA5E0?logo=telegram&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)
+![Ruff](https://img.shields.io/badge/linter-ruff-D7FF64?logo=ruff&logoColor=black)
+![Tests](https://img.shields.io/badge/tests-236%20passed-brightgreen?logo=pytest&logoColor=white)
+
 Telegram-бот для барбершопа: онлайн-запись клиентов и админ-панель прямо в чате.
 
 **Стек:** Python 3.12 · aiogram 3 · PostgreSQL 16 · SQLAlchemy 2 (async) · Alembic · APScheduler · Docker.
