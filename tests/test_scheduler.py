@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -31,7 +30,7 @@ from app.database.models import (
 from app.scheduler.jobs import complete_past_appointments, send_due_reminders
 from app.services.notifications import NotificationService
 from app.utils.dt import now_utc
-from tests.conftest import TZ, local
+from tests.conftest import local
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
