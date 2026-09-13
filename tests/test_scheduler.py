@@ -243,7 +243,7 @@ async def db_shop(session_factory):
     async with session_factory() as session:
         barber = Barber(name=f"Sched-{marker}")
         service = Service(name=f"Sched-{marker}", duration_minutes=60, price=Decimal("100"))
-        user = User(telegram_id=800_000 + int(marker[:4], 16) % 10000, language_code="ru")
+        user = User(telegram_id=800_000 + int(marker[:4], 16) % 10000, full_name="Sched User", language_code="ru")
         session.add_all([barber, service, user])
         await session.flush()
         session.add(WorkingSchedule(
