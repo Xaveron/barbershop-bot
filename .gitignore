@@ -1,0 +1,42 @@
+# Секреты — никогда не коммитить
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Тесты и кэш
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Docker volumes (локальные данные)
+pgdata/
+
+# Резервные копии
+backups/
+
+# Claude Code
+.claude/

@@ -1,0 +1,15 @@
+from app.database.repositories.appointment import AppointmentRepository
+from app.database.repositories.barber import BarberRepository
+from app.database.repositories.notification import NotificationRepository
+from app.database.repositories.schedule import ScheduleRepository
+from app.database.repositories.service import ServiceRepository
+from app.database.repositories.user import UserRepository
+
+__all__ = [
+    "AppointmentRepository",
+    "BarberRepository",
+    "NotificationRepository",
+    "ScheduleRepository",
+    "ServiceRepository",
+    "UserRepository",
+]

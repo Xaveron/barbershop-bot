@@ -1,0 +1,3 @@
+Миграции Alembic (async engine). Конфигурация — в alembic.ini и env.py.
+Создать новую миграцию: alembic revision --autogenerate -m "описание"
+Применить: alembic upgrade head

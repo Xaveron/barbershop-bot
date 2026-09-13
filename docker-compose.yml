@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: barbershop_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-barber}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-barber}
+      POSTGRES_DB: ${POSTGRES_DB:-barbershop}
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-barber} -d ${POSTGRES_DB:-barbershop}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    ports:
+      # Только localhost: база не должна торчать в интернет с дефолтным паролем.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+  bot:
+    build: .
+    container_name: barbershop_bot
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # URL всегда указывает на сервис db внутри compose-сети и перекрывает значение из .env
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-barber}:${POSTGRES_PASSWORD:-barber}@db:5432/${POSTGRES_DB:-barbershop}
+      TZ: UTC
+    # 20 секунд хватает, чтобы бот корректно завершил polling и закрыл соединения
+    stop_grace_period: 20s
+
+volumes:
+  pgdata:
