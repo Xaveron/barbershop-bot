@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, time
 from decimal import Decimal
 from unittest.mock import MagicMock
-from zoneinfo import ZoneInfo
 
 import pytest
 
