@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 class NotificationKind(enum.StrEnum):
     REMINDER_24H = "reminder_24h"
     REMINDER_2H = "reminder_2h"
+    RETURN_REMINDER = "return_reminder"
 
 
 class NotificationStatus(enum.StrEnum):

@@ -147,6 +147,12 @@ MESSAGES: dict[str, str] = {
     "notify.cancelled_by_client": "🚫 <b>Booking cancelled by the client</b>",
     "notify.cancelled_by_admin": "🚫 <b>Booking cancelled by the administrator</b>",
     "notify.client_moved": "🔄 <b>The client moved a booking</b>",
+    "notify.return_reminder": (
+        "💈 <b>Time for a haircut?</b>\n\n"
+        "It's been {weeks} weeks since your last visit to {shop}.\n"
+        "How about booking again?\n\n"
+        "Tap /start to pick a convenient time."
+    ),
     # --- Domain errors ------------------------------------------------------
     "rule.already_cancelled": "This booking is already cancelled.",
     "rule.already_completed": "This booking is already completed.",

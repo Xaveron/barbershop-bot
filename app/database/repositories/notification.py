@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 
@@ -80,8 +80,17 @@ class NotificationRepository(BaseRepository):
                 Notification.status == NotificationStatus.PENDING,
                 Notification.scheduled_for <= now,
                 Notification.attempts < MAX_ATTEMPTS,
-                Appointment.status == AppointmentStatus.CONFIRMED,
-                Appointment.starts_at > now,
+                or_(
+                    and_(
+                        Notification.kind != NotificationKind.RETURN_REMINDER,
+                        Appointment.status == AppointmentStatus.CONFIRMED,
+                        Appointment.starts_at > now,
+                    ),
+                    and_(
+                        Notification.kind == NotificationKind.RETURN_REMINDER,
+                        Appointment.status == AppointmentStatus.COMPLETED,
+                    ),
+                ),
             )
             .order_by(Notification.scheduled_for)
             .limit(limit)

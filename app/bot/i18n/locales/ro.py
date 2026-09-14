@@ -152,6 +152,12 @@ MESSAGES: dict[str, str] = {
     "notify.cancelled_by_client": "🚫 <b>Programare anulată de client</b>",
     "notify.cancelled_by_admin": "🚫 <b>Programare anulată de administrator</b>",
     "notify.client_moved": "🔄 <b>Clientul a mutat programarea</b>",
+    "notify.return_reminder": (
+        "💈 <b>E timpul pentru un tuns?</b>\n\n"
+        "Au trecut {weeks} săpt. de la ultima ta vizită la {shop}.\n"
+        "Programează-te din nou!\n\n"
+        "Apasă /start pentru a alege un moment convenabil."
+    ),
     # --- Erori de domeniu ---------------------------------------------------
     "rule.already_cancelled": "Această programare este deja anulată.",
     "rule.already_completed": "Această programare este deja finalizată.",
