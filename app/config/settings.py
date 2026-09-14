@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     def admin_ids(self) -> tuple[int, ...]:
         """ADMIN_ID может содержать несколько id через запятую/точку с запятой."""
         raw = self.admin_id.replace(";", ",").replace(" ", ",")
-        return tuple(int(chunk) for chunk in raw.split(",") if chunk.strip().lstrip("-").isdigit())
+        return tuple(int(chunk) for chunk in raw.split(",") if chunk.strip().isdigit())
 
     @property
     def tz(self) -> ZoneInfo:

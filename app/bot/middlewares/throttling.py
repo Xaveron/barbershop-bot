@@ -73,7 +73,7 @@ class ThrottlingMiddleware(BaseMiddleware):
 
     def _prune(self, now: float) -> None:
         """Не даём словарям расти бесконечно."""
-        if len(self._events) < 5000:
+        if len(self._events) < 500:
             return
         stale = [uid for uid, seen in self._last.items() if now - seen > 300]
         for uid in stale:
