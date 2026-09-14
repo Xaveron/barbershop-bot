@@ -60,9 +60,17 @@ class NotificationService:
                 due = await repository.list_due(now=now_utc(), limit=batch_size)
                 for notification in due:
                     appointment = notification.appointment
-                    delivered = await self._deliver(notification, appointment, repository, users)
-                    if delivered:
-                        sent += 1
+                    try:
+                        async with session.begin_nested():
+                            delivered = await self._deliver(
+                                notification, appointment, repository, users
+                            )
+                        if delivered:
+                            sent += 1
+                    except Exception:
+                        logger.exception(
+                            "Неожиданная ошибка при доставке напоминания %s", notification.id
+                        )
                 await session.commit()
             except Exception:
                 await session.rollback()
