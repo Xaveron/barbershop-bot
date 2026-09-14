@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
@@ -16,17 +17,19 @@ from app.bot.keyboards.admin import (
     admin_appointment_kb,
     admin_appointments_kb,
     back_to_admin_kb,
+    bulk_cancel_days_kb,
+    confirm_bulk_cancel_kb,
 )
 from app.bot.keyboards.callbacks import AdmCB
 from app.bot.states import RescheduleSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
 from app.database.models import AppointmentStatus, CancelledBy
-from app.database.repositories import AppointmentRepository
+from app.database.repositories import AppointmentRepository, NotificationRepository
 from app.services.booking import BookingError, BookingService
 from app.services.formatting import appointment_card
 from app.services.notifications import NotificationService, client_language
-from app.utils.dt import now_utc
+from app.utils.dt import combine_local, format_day, now_utc, to_local
 from app.utils.text import esc
 
 logger = logging.getLogger(__name__)
@@ -188,3 +191,137 @@ async def move_appointment(
     await state.set_state(RescheduleSG.day)
     await _render_reschedule_days(callback, state, session, settings, settings.default_language)
     await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Массовая отмена за день
+# ---------------------------------------------------------------------------
+
+@router.callback_query(AdmCB.filter(F.action == "bcx_days"))
+async def show_bulk_cancel_days(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    await state.clear()
+    now = now_utc()
+    appointments = await AppointmentRepository(session).list_between(
+        start=now,
+        end=now + timedelta(days=30),
+        statuses=(AppointmentStatus.CONFIRMED,),
+        limit=500,
+    )
+    if not appointments:
+        await edit_message(
+            callback, "📅 Нет предстоящих записей для отмены.", back_to_admin_kb("appts", "0")
+        )
+        await callback.answer()
+        return
+
+    by_day: dict[date, int] = defaultdict(int)
+    for appt in appointments:
+        by_day[to_local(appt.starts_at, settings.tz).date()] += 1
+
+    await edit_message(
+        callback,
+        "❌ <b>Массовая отмена за день</b>\n\nВыберите дату:",
+        bulk_cancel_days_kb(sorted(by_day.items())),
+    )
+    await callback.answer()
+
+
+@router.callback_query(AdmCB.filter(F.action == "bcx_conf"))
+async def confirm_bulk_cancel(
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    try:
+        selected_date = date.fromisoformat(callback_data.arg)
+    except ValueError:
+        await alert(callback, "Некорректная дата.")
+        return
+
+    day_start = combine_local(selected_date, datetime.min.time(), settings.tz)
+    day_end = day_start + timedelta(days=1)
+    count = await AppointmentRepository(session).count_between(
+        start=day_start, end=day_end, statuses=(AppointmentStatus.CONFIRMED,)
+    )
+    if count == 0:
+        await alert(callback, "На этот день нет активных записей.")
+        return
+
+    day_str = format_day(selected_date, settings.default_language)
+    await edit_message(
+        callback,
+        f"❌ <b>Подтвердите отмену</b>\n\n"
+        f"Дата: <b>{day_str}</b>\n"
+        f"Записей: <b>{count}</b>\n\n"
+        f"Каждый клиент получит уведомление об отмене.",
+        confirm_bulk_cancel_kb(callback_data.arg, count),
+    )
+    await callback.answer()
+
+
+@router.callback_query(AdmCB.filter(F.action == "bcx_ok"))
+async def execute_bulk_cancel(
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    session: AsyncSession,
+    settings: Settings,
+    bot: Bot,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    try:
+        selected_date = date.fromisoformat(callback_data.arg)
+    except ValueError:
+        await alert(callback, "Некорректная дата.")
+        return
+
+    day_start = combine_local(selected_date, datetime.min.time(), settings.tz)
+    day_end = day_start + timedelta(days=1)
+
+    repository = AppointmentRepository(session)
+    notifications_repo = NotificationRepository(session)
+    appointments = await repository.list_between(
+        start=day_start, end=day_end,
+        statuses=(AppointmentStatus.CONFIRMED,),
+        limit=500,
+    )
+    if not appointments:
+        await alert(callback, "На этот день нет активных записей.")
+        return
+
+    now = now_utc()
+    for appt in appointments:
+        appt.status = AppointmentStatus.CANCELLED
+        appt.cancelled_at = now
+        appt.cancelled_by = CancelledBy.ADMIN
+        await notifications_repo.drop_pending(appt.id)
+
+    await session.commit()
+
+    count = len(appointments)
+    day_str = format_day(selected_date, settings.default_language)
+    logger.info("Массовая отмена: %s записей на %s", count, selected_date)
+
+    await edit_message(
+        callback,
+        f"✅ <b>Отменено {count} записей на {day_str}</b>\n\nОтправляем уведомления клиентам...",
+        back_to_admin_kb("appts", "0"),
+    )
+    await callback.answer(f"Отменено: {count}")
+
+    notifier = NotificationService(bot, session_factory, settings)
+    for appt in appointments:
+        lang = client_language(appt, settings)
+        await notifier.notify_client(
+            appt.user.telegram_id,
+            t("appointments.cancelled_by_shop", lang)
+            + "\n\n"
+            + appointment_card(appt, settings.tz, lang=lang)
+            + "\n\n"
+            + t("appointments.apologies", lang, phone=esc(settings.shop_phone)),
+        )

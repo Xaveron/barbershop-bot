@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -188,7 +189,36 @@ def admin_appointments_kb(
         )
     if navigation:
         builder.row(*navigation)
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Отменить за день",
+            callback_data=AdmCB(action="bcx_days").pack(),
+        )
+    )
     builder.row(_back("menu"))
+    return builder.as_markup()
+
+
+def bulk_cancel_days_kb(days: list[tuple[date, int]]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for day, count in days:
+        builder.button(
+            text=f"{day.strftime('%d.%m.%Y')} — {count} зап.",
+            callback_data=AdmCB(action="bcx_conf", arg=day.isoformat()),
+        )
+    builder.button(text="⬅️ К записям", callback_data=AdmCB(action="appts", arg="0"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def confirm_bulk_cancel_kb(day_iso: str, count: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text=f"❌ Да, отменить {count} зап.",
+        callback_data=AdmCB(action="bcx_ok", arg=day_iso),
+    )
+    builder.button(text="⬅️ Назад", callback_data=AdmCB(action="bcx_days"))
+    builder.adjust(1)
     return builder.as_markup()
 
 
