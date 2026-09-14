@@ -148,7 +148,13 @@ async def save_hours(
 
     await state.clear()
     try:
-        await ScheduleRepository(session, tenant_id).set_day(barber_id, weekday, start, end)
+        record = await ScheduleRepository(session, tenant_id).set_day(
+            barber_id, weekday, start, end
+        )
+        if record is None:
+            await session.rollback()
+            await message.answer("Барбер не найден.")
+            return
         await session.commit()
     except Exception:
         await session.rollback()
@@ -384,13 +390,16 @@ async def _save_exception(
     if scope != "all" and barber_id is None:
         return False
     try:
-        await ScheduleRepository(session, tenant_id).upsert_exception(
+        saved = await ScheduleRepository(session, tenant_id).upsert_exception(
             barber_id=barber_id,
             exception_date=date_type.fromisoformat(raw_date),
             is_day_off=is_day_off,
             start_time=start,
             end_time=end,
         )
+        if saved is None:
+            await session.rollback()
+            return False
         await session.commit()
     except Exception:
         await session.rollback()

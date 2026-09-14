@@ -3,13 +3,24 @@ from __future__ import annotations
 import uuid
 from datetime import date, time
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
-from app.database.models import ScheduleException, WorkingSchedule
+from app.database.models import Barber, ScheduleException, WorkingSchedule
 from app.database.repositories.base import TenantScopedRepository
 
 
 class ScheduleRepository(TenantScopedRepository):
+    async def _barber_belongs_to_tenant(self, barber_id: uuid.UUID) -> bool:
+        """set_day/upsert_exception создают строку по чужому barber_id, если её ещё
+        не было — get_day/_find_exception находят "нет строки" одинаково что для
+        барбера чужого арендатора, что для несуществующего дня своего. Без этой
+        проверки они молча создали бы запись, ссылающуюся на барбера другого
+        арендатора (утечка не данных, но чужого FK — тоже нарушение изоляции)."""
+        stmt = select(func.count()).select_from(Barber).where(
+            Barber.id == barber_id, Barber.tenant_id == self.tenant_id
+        )
+        return bool(await self.session.scalar(stmt))
+
     # --- Недельный график ---------------------------------------------------
     async def list_week(self, barber_id: uuid.UUID) -> list[WorkingSchedule]:
         stmt = (
@@ -32,7 +43,9 @@ class ScheduleRepository(TenantScopedRepository):
 
     async def set_day(
         self, barber_id: uuid.UUID, weekday: int, start: time, end: time
-    ) -> WorkingSchedule:
+    ) -> WorkingSchedule | None:
+        if not await self._barber_belongs_to_tenant(barber_id):
+            return None
         record = await self.get_day(barber_id, weekday)
         if record is None:
             record = WorkingSchedule(
@@ -96,7 +109,9 @@ class ScheduleRepository(TenantScopedRepository):
         start_time: time | None = None,
         end_time: time | None = None,
         reason: str | None = None,
-    ) -> ScheduleException:
+    ) -> ScheduleException | None:
+        if barber_id is not None and not await self._barber_belongs_to_tenant(barber_id):
+            return None
         existing = await self._find_exception(barber_id, exception_date)
         if existing is None:
             existing = ScheduleException(

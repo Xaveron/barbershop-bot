@@ -19,8 +19,12 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="Europe/Chisinau")
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="MDL")
+    timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="Europe/Chisinau", server_default="Europe/Chisinau"
+    )
+    currency: Mapped[str] = mapped_column(
+        String(3), nullable=False, default="MDL", server_default="MDL"
+    )
     shop_name: Mapped[str | None] = mapped_column(String(255))
     shop_address: Mapped[str | None] = mapped_column(Text)
     shop_phone: Mapped[str | None] = mapped_column(String(32))

@@ -27,6 +27,7 @@ from app.database.models import (
     Barber,
     CancelledBy,
     Notification,
+    NotificationKind,
     NotificationStatus,
     ScheduleException,
     Service,
@@ -34,7 +35,13 @@ from app.database.models import (
     User,
     WorkingSchedule,
 )
-from app.database.repositories import AppointmentRepository, BarberRepository, ServiceRepository
+from app.database.repositories import (
+    AppointmentRepository,
+    BarberRepository,
+    NotificationRepository,
+    ScheduleRepository,
+    ServiceRepository,
+)
 from app.services.booking import (
     AppointmentNotFoundError,
     BookingError,
@@ -459,6 +466,145 @@ async def test_service_name_unique_per_tenant_not_globally(session_factory):
 # ровно с одним tenant_id (см. app/main.py). Второй такой процесс появится
 # только в фазе мульти-бота; до тех пор изоляция доказывается на уровне
 # репозиториев/сервисов выше, где и происходит реальный доступ к БД.
+
+
+async def test_schedule_set_day_rejects_barber_from_another_tenant(session_factory):
+    """Найденная в аудите дыра: set_day создавал WorkingSchedule по чужому
+    barber_id, если у своего арендатора просто не было записи на этот день —
+    "нет строки" неотличимо от "барбер не мой". Теперь должен вернуть None
+    и не создавать ничего."""
+    async with session_factory() as session:
+        tenant_a = Tenant(name="Tenant A", slug=f"a-{uuid.uuid4().hex[:8]}")
+        tenant_b = Tenant(name="Tenant B", slug=f"b-{uuid.uuid4().hex[:8]}")
+        session.add_all([tenant_a, tenant_b])
+        await session.flush()
+        barber_b = Barber(tenant_id=tenant_b.id, name="Barber B")
+        session.add(barber_b)
+        await session.commit()
+        tenant_a_id, tenant_b_id, barber_b_id = tenant_a.id, tenant_b.id, barber_b.id
+
+    try:
+        async with session_factory() as session:
+            record = await ScheduleRepository(session, tenant_a_id).set_day(
+                barber_b_id, 0, time(10, 0), time(19, 0)
+            )
+            assert record is None
+
+        async with session_factory() as session:
+            leaked = await session.scalar(
+                select(WorkingSchedule).where(WorkingSchedule.barber_id == barber_b_id)
+            )
+            assert leaked is None
+    finally:
+        async with session_factory() as cleanup:
+            await cleanup.execute(delete(WorkingSchedule).where(WorkingSchedule.barber_id == barber_b_id))
+            await cleanup.execute(delete(Barber).where(Barber.id == barber_b_id))
+            await cleanup.execute(delete(Tenant).where(Tenant.id.in_((tenant_a_id, tenant_b_id))))
+            await cleanup.commit()
+
+
+async def test_schedule_upsert_exception_rejects_barber_from_another_tenant(session_factory):
+    """Тот же класс дыры, что и в set_day, но для исключений из графика."""
+    async with session_factory() as session:
+        tenant_a = Tenant(name="Tenant A", slug=f"a-{uuid.uuid4().hex[:8]}")
+        tenant_b = Tenant(name="Tenant B", slug=f"b-{uuid.uuid4().hex[:8]}")
+        session.add_all([tenant_a, tenant_b])
+        await session.flush()
+        barber_b = Barber(tenant_id=tenant_b.id, name="Barber B")
+        session.add(barber_b)
+        await session.commit()
+        tenant_a_id, tenant_b_id, barber_b_id = tenant_a.id, tenant_b.id, barber_b.id
+
+    exception_date = (now_utc() + timedelta(days=5)).date()
+    try:
+        async with session_factory() as session:
+            saved = await ScheduleRepository(session, tenant_a_id).upsert_exception(
+                barber_id=barber_b_id, exception_date=exception_date, is_day_off=True
+            )
+            assert saved is None
+
+        async with session_factory() as session:
+            leaked = await session.scalar(
+                select(ScheduleException).where(ScheduleException.barber_id == barber_b_id)
+            )
+            assert leaked is None
+    finally:
+        async with session_factory() as cleanup:
+            await cleanup.execute(
+                delete(ScheduleException).where(ScheduleException.barber_id == barber_b_id)
+            )
+            await cleanup.execute(delete(Barber).where(Barber.id == barber_b_id))
+            await cleanup.execute(delete(Tenant).where(Tenant.id.in_((tenant_a_id, tenant_b_id))))
+            await cleanup.commit()
+
+
+async def test_notification_list_due_is_scoped_to_tenant(session_factory, settings):
+    """Найденная в аудите дыра: list_due не фильтровал по арендатору — рассылка
+    одного бота могла подхватить и отправить due-напоминание клиенту другого
+    арендатора чужим ботом/токеном."""
+    ids: dict[str, tuple] = {}
+    async with session_factory() as session:
+        tenant_a = Tenant(name="Tenant A", slug=f"a-{uuid.uuid4().hex[:8]}")
+        tenant_b = Tenant(name="Tenant B", slug=f"b-{uuid.uuid4().hex[:8]}")
+        session.add_all([tenant_a, tenant_b])
+        await session.flush()
+
+        for label, tenant, tg_id in (("a", tenant_a, 800_101), ("b", tenant_b, 800_202)):
+            barber = Barber(tenant_id=tenant.id, name=f"Barber {label}")
+            service = Service(
+                tenant_id=tenant.id, name=f"Cut {label}", duration_minutes=60, price=Decimal("100")
+            )
+            user = User(tenant_id=tenant.id, telegram_id=tg_id, full_name=f"Client {label}")
+            session.add_all([barber, service, user])
+            await session.flush()
+            start = target_slot(settings, hour=12)
+            appt = Appointment(
+                tenant_id=tenant.id,
+                user_id=user.id,
+                barber_id=barber.id,
+                service_id=service.id,
+                starts_at=start,
+                ends_at=start + timedelta(minutes=60),
+                status=AppointmentStatus.CONFIRMED,
+                price=Decimal("100"),
+                duration_minutes=60,
+            )
+            session.add(appt)
+            await session.flush()
+            notif = Notification(
+                id=uuid.uuid4(),
+                appointment_id=appt.id,
+                kind=NotificationKind.REMINDER_2H,
+                status=NotificationStatus.PENDING,
+                scheduled_for=now_utc() - timedelta(minutes=1),
+                attempts=0,
+            )
+            session.add(notif)
+            await session.flush()
+            ids[label] = (tenant.id, barber.id, service.id, user.id, appt.id, notif.id)
+        await session.commit()
+
+    try:
+        async with session_factory() as session:
+            due_for_a = await NotificationRepository(session).list_due(
+                now=now_utc(), tenant_id=ids["a"][0]
+            )
+            due_ids = {n.id for n in due_for_a}
+            assert ids["a"][5] in due_ids
+            assert ids["b"][5] not in due_ids
+    finally:
+        async with session_factory() as cleanup:
+            for _, _, _, _, appt_id, _ in ids.values():
+                await cleanup.execute(delete(Notification).where(Notification.appointment_id == appt_id))
+                await cleanup.execute(delete(Appointment).where(Appointment.id == appt_id))
+            for _, barber_id_, service_id_, user_id_, _, _ in ids.values():
+                await cleanup.execute(delete(Barber).where(Barber.id == barber_id_))
+                await cleanup.execute(delete(Service).where(Service.id == service_id_))
+                await cleanup.execute(delete(User).where(User.id == user_id_))
+            await cleanup.execute(
+                delete(Tenant).where(Tenant.id.in_([v[0] for v in ids.values()]))
+            )
+            await cleanup.commit()
 
 
 async def test_cancel_frees_the_slot_and_drops_reminders(

@@ -69,7 +69,9 @@ class NotificationService:
             repository = NotificationRepository(session)
             users = UserRepository(session, self.tenant_id)
             try:
-                due = await repository.list_due(now=now_utc(), limit=batch_size)
+                due = await repository.list_due(
+                    now=now_utc(), tenant_id=self.tenant_id, limit=batch_size
+                )
                 for notification in due:
                     appointment = notification.appointment
                     try:

@@ -70,13 +70,21 @@ class NotificationRepository(BaseRepository):
         result = await self.session.execute(stmt)
         return int(result.rowcount or 0)
 
-    async def list_due(self, *, now: datetime, limit: int = 50) -> list[Notification]:
+    async def list_due(
+        self, *, now: datetime, tenant_id: uuid.UUID, limit: int = 50
+    ) -> list[Notification]:
+        """tenant_id обязателен: без него рассылка одного бота задела бы
+        напоминания клиентов другого арендатора (см. дизайн-решение №6 —
+        у notifications своей колонки tenant_id нет, но список "due"
+        системный по своей природе, а не привязан к уже известной записи,
+        поэтому фильтр по арендатору нужен именно здесь, через join)."""
         stmt = (
             select(Notification)
             .join(Appointment, Notification.appointment_id == Appointment.id)
             # selectinload (а не joinedload): FOR UPDATE несовместим с LEFT OUTER JOIN
             .options(selectinload(Notification.appointment))
             .where(
+                Appointment.tenant_id == tenant_id,
                 Notification.status == NotificationStatus.PENDING,
                 Notification.scheduled_for <= now,
                 Notification.attempts < MAX_ATTEMPTS,
