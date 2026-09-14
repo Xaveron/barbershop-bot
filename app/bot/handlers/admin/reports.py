@@ -13,9 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.admin import back_to_admin_kb, clients_kb, export_periods_kb
 from app.bot.keyboards.callbacks import AdmCB
+from app.bot.middlewares.permissions import RequirePermission
 from app.bot.utils import alert, edit_message
 from app.config import Settings
+from app.database.models import Permission, StaffMember
 from app.database.repositories import UserRepository
+from app.services.authorization import AuthorizationError, AuthorizationService
 from app.services.export import ExportService
 from app.services.stats import StatsService
 from app.utils.dt import now_utc
@@ -23,6 +26,8 @@ from app.utils.text import esc, money
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin-reports")
+router.message.filter(RequirePermission(Permission.VIEW_ANALYTICS))
+router.callback_query.filter(RequirePermission(Permission.VIEW_ANALYTICS))
 
 CLIENTS_PAGE_SIZE = 10
 MAX_EXPORT_DAYS = 3650
@@ -111,7 +116,21 @@ async def export_csv(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
+    # Доп. проверка сверх VIEW_ANALYTICS на уровне роутера: массовая выгрузка
+    # имён/телефонов клиентов в CSV чувствительнее просмотра сводки в чате —
+    # роль с одним VIEW_ANALYTICS (например MANAGER) не должна автоматически
+    # получать право на выгрузку персональных данных (см. docs/RBAC_DESIGN.md §5).
+    is_super_admin = bool(callback.from_user and settings.is_admin(callback.from_user.id))
+    try:
+        AuthorizationService.require(
+            staff, Permission.MANAGE_CUSTOMERS, is_super_admin=is_super_admin
+        )
+    except AuthorizationError:
+        await alert(callback, "Недостаточно прав для экспорта.")
+        return
+
     now = now_utc()
     if callback_data.arg == "all":
         start = now - timedelta(days=3650)

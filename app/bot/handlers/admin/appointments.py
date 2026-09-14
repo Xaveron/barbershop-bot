@@ -22,10 +22,11 @@ from app.bot.keyboards.admin import (
     confirm_bulk_cancel_kb,
 )
 from app.bot.keyboards.callbacks import AdmCB
+from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import RescheduleSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
-from app.database.models import AppointmentStatus, CancelledBy
+from app.database.models import AppointmentStatus, CancelledBy, Permission
 from app.database.repositories import AppointmentRepository, NotificationRepository
 from app.services.booking import BookingError, BookingService
 from app.services.formatting import appointment_card
@@ -35,6 +36,8 @@ from app.utils.text import esc
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin-appointments")
+router.message.filter(RequirePermission(Permission.MANAGE_BOOKINGS))
+router.callback_query.filter(RequirePermission(Permission.MANAGE_BOOKINGS))
 
 PAGE_SIZE = 8
 

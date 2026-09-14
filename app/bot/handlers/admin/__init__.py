@@ -11,14 +11,16 @@ from app.bot.handlers.admin import (
     schedule,
     services,
 )
-from app.bot.middlewares.admin import IsAdmin
+from app.bot.middlewares.permissions import IsStaff
 
 
 def build_admin_router() -> Router:
-    """Все админ-хендлеры за общим фильтром прав."""
+    """Все админ-хендлеры за общим фильтром «это вообще сотрудник арендатора
+    или платформенный SUPER_ADMIN». Конкретное право на конкретный раздел
+    проверяет RequirePermission на каждом под-роутере (см. docs/RBAC_DESIGN.md)."""
     router = Router(name="admin")
-    router.message.filter(IsAdmin())
-    router.callback_query.filter(IsAdmin())
+    router.message.filter(IsStaff())
+    router.callback_query.filter(IsStaff())
 
     router.include_router(menu.router)
     router.include_router(services.router)

@@ -21,9 +21,11 @@ from app.bot.keyboards.admin import (
     weekday_actions_kb,
 )
 from app.bot.keyboards.callbacks import AdmCB, AdmDayCB
+from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import AdminExceptionSG, AdminScheduleSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
+from app.database.models import Permission
 from app.database.repositories import BarberRepository, ScheduleRepository
 from app.services.schedule import ScheduleService
 from app.utils.dt import WEEKDAYS_FULL, format_time, today_in
@@ -32,6 +34,8 @@ from app.utils.validators import ValidationError, validate_date, validate_time_r
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin-schedule")
+router.message.filter(RequirePermission(Permission.MANAGE_SCHEDULE))
+router.callback_query.filter(RequirePermission(Permission.MANAGE_SCHEDULE))
 
 EXCEPTIONS_HORIZON_DAYS = 180
 

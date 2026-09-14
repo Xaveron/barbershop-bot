@@ -22,6 +22,7 @@ from app.bot.handlers import build_router
 from app.bot.middlewares import (
     DatabaseMiddleware,
     PrivateChatOnlyMiddleware,
+    StaffContextMiddleware,
     TextLimitMiddleware,
     ThrottlingMiddleware,
     UserContextMiddleware,
@@ -78,6 +79,7 @@ def build_dispatcher(settings: Settings, session_factory, tenant_id: uuid.UUID) 
     dispatcher.update.outer_middleware(PrivateChatOnlyMiddleware(settings.default_language))
     dispatcher.update.outer_middleware(DatabaseMiddleware(session_factory))
     dispatcher.update.outer_middleware(UserContextMiddleware(settings))
+    dispatcher.update.outer_middleware(StaffContextMiddleware(settings))
 
     dispatcher.include_router(build_router())
     return dispatcher

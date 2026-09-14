@@ -17,9 +17,10 @@ from app.bot.keyboards.admin import (
     confirm_delete_kb,
 )
 from app.bot.keyboards.callbacks import AdmCB
+from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import AdminBarberSG, AdminFieldSG
 from app.bot.utils import alert, edit_message, parse_uuid
-from app.database.models import Barber
+from app.database.models import Barber, Permission
 from app.database.repositories import BarberRepository, ScheduleRepository
 from app.utils.dt import WEEKDAYS_SHORT, format_time
 from app.utils.text import esc
@@ -27,6 +28,8 @@ from app.utils.validators import ValidationError, validate_description, validate
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin-barbers")
+router.message.filter(RequirePermission(Permission.MANAGE_STAFF))
+router.callback_query.filter(RequirePermission(Permission.MANAGE_STAFF))
 
 
 async def barber_card(

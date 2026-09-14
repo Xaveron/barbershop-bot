@@ -18,10 +18,11 @@ from app.bot.keyboards.admin import (
     confirm_delete_kb,
 )
 from app.bot.keyboards.callbacks import AdmCB
+from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import AdminFieldSG, AdminServiceSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
-from app.database.models import Service
+from app.database.models import Permission, Service
 from app.database.repositories import ServiceRepository
 from app.utils.dt import format_duration
 from app.utils.text import esc, money
@@ -35,6 +36,8 @@ from app.utils.validators import (
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin-services")
+router.message.filter(RequirePermission(Permission.MANAGE_SERVICES))
+router.callback_query.filter(RequirePermission(Permission.MANAGE_SERVICES))
 
 
 def service_card(service: Service) -> tuple[str, InlineKeyboardMarkup]:
