@@ -26,8 +26,9 @@ from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import RescheduleSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
-from app.database.models import AppointmentStatus, CancelledBy, Permission
+from app.database.models import AppointmentStatus, CancelledBy, Permission, StaffMember
 from app.database.repositories import AppointmentRepository, NotificationRepository
+from app.services.authorization import resolve_accessible_branch_ids
 from app.services.booking import BookingError, BookingService
 from app.services.formatting import appointment_card
 from app.services.notifications import NotificationService, client_language
@@ -42,6 +43,16 @@ router.callback_query.filter(RequirePermission(Permission.MANAGE_BOOKINGS))
 PAGE_SIZE = 8
 
 
+async def _accessible_branch_ids(
+    callback: CallbackQuery, session: AsyncSession, settings: Settings,
+    tenant_id: uuid.UUID, staff: StaffMember | None,
+) -> frozenset[uuid.UUID] | None:
+    is_super_admin = bool(callback.from_user and settings.is_admin(callback.from_user.id))
+    return await resolve_accessible_branch_ids(
+        session, tenant_id, staff, is_super_admin=is_super_admin
+    )
+
+
 @router.callback_query(AdmCB.filter(F.action == "appts"))
 async def show_appointments(
     callback: CallbackQuery,
@@ -50,19 +61,22 @@ async def show_appointments(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     await state.clear()
     page = int(callback_data.arg) if callback_data.arg.isdigit() else 0
     now = now_utc()
     horizon = now + timedelta(days=365)
+    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
     repository = AppointmentRepository(session, tenant_id)
     total = await repository.count_between(
-        start=now, end=horizon, statuses=(AppointmentStatus.CONFIRMED,)
+        start=now, end=horizon, statuses=(AppointmentStatus.CONFIRMED,), branch_ids=branch_ids
     )
     appointments = await repository.list_between(
         start=now,
         end=horizon,
         statuses=(AppointmentStatus.CONFIRMED,),
+        branch_ids=branch_ids,
         limit=PAGE_SIZE,
         offset=page * PAGE_SIZE,
     )
@@ -75,9 +89,7 @@ async def show_appointments(
 
     has_next = (page + 1) * PAGE_SIZE < total
     text = f"📅 <b>Предстоящие записи</b> (всего {total})\n\nВыберите запись:"
-    await edit_message(
-        callback, text, admin_appointments_kb(appointments, settings.tz, page, has_next)
-    )
+    await edit_message(callback, text, admin_appointments_kb(appointments, page, has_next))
     await callback.answer()
 
 
@@ -89,6 +101,7 @@ async def show_appointment(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     await state.clear()
     appointment_id = parse_uuid(callback_data.arg)
@@ -100,8 +113,14 @@ async def show_appointment(
     if appointment is None:
         await alert(callback, "Запись не найдена.")
         return
+    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    if branch_ids is not None and appointment.branch_id not in branch_ids:
+        await alert(callback, "Недостаточно прав.")
+        return
     text = (
-        appointment_card(appointment, settings.tz, with_status=True, lang=settings.default_language)
+        appointment_card(
+            appointment, appointment.branch.tz, with_status=True, lang=settings.default_language
+        )
         + f"\n\n👤 {esc(appointment.user.display_name)}"
         + f"\n🆔 <code>{appointment.id}</code>"
     )
@@ -116,12 +135,21 @@ async def cancel_appointment(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     appointment_id = parse_uuid(callback_data.arg)
     if appointment_id is None:
         await alert(callback, "Некорректная запись.")
+        return
+    target = await AppointmentRepository(session, tenant_id).get(appointment_id)
+    if target is None:
+        await alert(callback, "Запись не найдена.")
+        return
+    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    if branch_ids is not None and target.branch_id not in branch_ids:
+        await alert(callback, "Недостаточно прав.")
         return
     try:
         appointment = await BookingService(session, settings, tenant_id).cancel_appointment(
@@ -134,7 +162,7 @@ async def cancel_appointment(
     await edit_message(
         callback,
         "❌ <b>Запись отменена администратором</b>\n\n"
-        + appointment_card(appointment, settings.tz, lang=settings.default_language),
+        + appointment_card(appointment, appointment.branch.tz, lang=settings.default_language),
         back_to_admin_kb("appts", "0"),
     )
     await callback.answer("Отменено")
@@ -145,7 +173,7 @@ async def cancel_appointment(
         appointment.user.telegram_id,
         t("appointments.cancelled_by_shop", lang)
         + "\n\n"
-        + appointment_card(appointment, settings.tz, lang=lang)
+        + appointment_card(appointment, appointment.branch.tz, lang=lang)
         + "\n\n"
         + t("appointments.apologies", lang, phone=esc(settings.shop_phone)),
     )
@@ -158,11 +186,20 @@ async def mark_no_show(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     """Клиент не пришёл: запись закрывается, напоминания снимаются."""
     appointment_id = parse_uuid(callback_data.arg)
     if appointment_id is None:
         await alert(callback, "Некорректная запись.")
+        return
+    target = await AppointmentRepository(session, tenant_id).get(appointment_id)
+    if target is None:
+        await alert(callback, "Запись не найдена.")
+        return
+    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    if branch_ids is not None and target.branch_id not in branch_ids:
+        await alert(callback, "Недостаточно прав.")
         return
     try:
         appointment = await BookingService(session, settings, tenant_id).mark_no_show(
@@ -175,7 +212,7 @@ async def mark_no_show(
     await edit_message(
         callback,
         "🚫 <b>Отмечено: клиент не пришёл</b>\n\n"
-        + appointment_card(appointment, settings.tz, lang=settings.default_language),
+        + appointment_card(appointment, appointment.branch.tz, lang=settings.default_language),
         back_to_admin_kb("appts", "0"),
     )
     await callback.answer("Отмечено")
@@ -189,6 +226,7 @@ async def move_appointment(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     appointment_id = parse_uuid(callback_data.arg)
     appointment = (
@@ -198,6 +236,10 @@ async def move_appointment(
     )
     if appointment is None:
         await alert(callback, "Запись не найдена.")
+        return
+    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    if branch_ids is not None and appointment.branch_id not in branch_ids:
+        await alert(callback, "Недостаточно прав.")
         return
     await state.clear()
     await state.update_data(appointment_id=str(appointment.id), by_admin=True)
@@ -219,13 +261,16 @@ async def show_bulk_cancel_days(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     await state.clear()
     now = now_utc()
+    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
     appointments = await AppointmentRepository(session, tenant_id).list_between(
         start=now,
         end=now + timedelta(days=30),
         statuses=(AppointmentStatus.CONFIRMED,),
+        branch_ids=branch_ids,
         limit=500,
     )
     if not appointments:
@@ -237,7 +282,7 @@ async def show_bulk_cancel_days(
 
     by_day: dict[date, int] = defaultdict(int)
     for appt in appointments:
-        by_day[to_local(appt.starts_at, settings.tz).date()] += 1
+        by_day[to_local(appt.starts_at, appt.branch.tz).date()] += 1
 
     await edit_message(
         callback,
@@ -254,6 +299,7 @@ async def confirm_bulk_cancel(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     try:
         selected_date = date.fromisoformat(callback_data.arg)
@@ -261,10 +307,15 @@ async def confirm_bulk_cancel(
         await alert(callback, "Некорректная дата.")
         return
 
+    # Массовая отмена за день не привязана к одному филиалу — границы дня
+    # считаем в settings.tz (тот же выбор, что и раньше), фактическая
+    # выборка/отмена ниже уже фильтруется по доступным сотруднику филиалам.
     day_start = combine_local(selected_date, datetime.min.time(), settings.tz)
     day_end = day_start + timedelta(days=1)
+    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
     count = await AppointmentRepository(session, tenant_id).count_between(
-        start=day_start, end=day_end, statuses=(AppointmentStatus.CONFIRMED,)
+        start=day_start, end=day_end, statuses=(AppointmentStatus.CONFIRMED,),
+        branch_ids=branch_ids,
     )
     if count == 0:
         await alert(callback, "На этот день нет активных записей.")
@@ -289,6 +340,7 @@ async def execute_bulk_cancel(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -301,11 +353,13 @@ async def execute_bulk_cancel(
     day_start = combine_local(selected_date, datetime.min.time(), settings.tz)
     day_end = day_start + timedelta(days=1)
 
+    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
     repository = AppointmentRepository(session, tenant_id)
     notifications_repo = NotificationRepository(session)
     appointments = await repository.list_between(
         start=day_start, end=day_end,
         statuses=(AppointmentStatus.CONFIRMED,),
+        branch_ids=branch_ids,
         limit=500,
     )
     if not appointments:
@@ -339,7 +393,7 @@ async def execute_bulk_cancel(
             appt.user.telegram_id,
             t("appointments.cancelled_by_shop", lang)
             + "\n\n"
-            + appointment_card(appt, settings.tz, lang=lang)
+            + appointment_card(appt, appt.branch.tz, lang=lang)
             + "\n\n"
             + t("appointments.apologies", lang, phone=esc(settings.shop_phone)),
         )

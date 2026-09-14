@@ -3,9 +3,9 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
-from app.database.models import Appointment, AppointmentStatus, Service
+from app.database.models import Appointment, AppointmentStatus, BranchService, Service
 from app.database.repositories.base import TenantScopedRepository
 
 
@@ -27,6 +27,27 @@ class ServiceRepository(TenantScopedRepository):
         stmt = (
             select(Service)
             .where(Service.tenant_id == self.tenant_id, Service.is_active.is_(True))
+            .order_by(Service.sort_order, Service.name)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def list_active_for_branch(self, branch_id: uuid.UUID) -> list[Service]:
+        """Отсутствие строки branch_services означает «доступна везде»
+        (opt-out) — LEFT JOIN, а не INNER, как для барберов/филиалов
+        (см. docs/STAFF_SERVICE_BRANCH_DESIGN.md)."""
+        stmt = (
+            select(Service)
+            .outerjoin(
+                BranchService,
+                (BranchService.service_id == Service.id)
+                & (BranchService.branch_id == branch_id)
+                & (BranchService.tenant_id == self.tenant_id),
+            )
+            .where(
+                Service.tenant_id == self.tenant_id,
+                Service.is_active.is_(True),
+                or_(BranchService.id.is_(None), BranchService.is_active.is_(True)),
+            )
             .order_by(Service.sort_order, Service.name)
         )
         return list(await self.session.scalars(stmt))

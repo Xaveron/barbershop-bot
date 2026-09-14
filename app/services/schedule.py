@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.database.models import ScheduleException, WorkingSchedule
+from app.database.models import Branch, ScheduleException, WorkingSchedule
 from app.database.repositories import AppointmentRepository, ScheduleRepository
 from app.services.slots import (
     DayOverride,
@@ -51,15 +51,17 @@ class ScheduleService:
         session: AsyncSession,
         settings: Settings,
         tenant_id: uuid.UUID,
-        branch_id: uuid.UUID,
+        branch: Branch,
     ) -> None:
         self.session = session
         self.settings = settings
         self.tenant_id = tenant_id
-        self.branch_id = branch_id
-        # tz по-прежнему из Settings, не из Branch.timezone — см. docs/BRANCHES_DESIGN.md:
-        # разводка per-branch часового пояса на реальную UTC-арифметику отложена.
-        self.tz = settings.tz
+        self.branch = branch
+        self.branch_id = branch.id
+        # Часовой пояс филиала, а не settings.tz — см. docs/STAFF_SERVICE_BRANCH_DESIGN.md.
+        # Вызывающий код обязан передать уже загруженный, проверенный Branch
+        # (свой арендатору, активный) — сервис не делает I/O в конструкторе.
+        self.tz = branch.tz
         self.schedules = ScheduleRepository(session, tenant_id)
         self.appointments = AppointmentRepository(session, tenant_id)
 

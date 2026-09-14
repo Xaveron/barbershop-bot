@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
-from app.database.models import Appointment, AppointmentStatus, Barber, BarberBranch
+from app.database.models import (
+    Appointment,
+    AppointmentStatus,
+    Barber,
+    BarberBranch,
+    BarberService,
+)
 from app.database.repositories.base import TenantScopedRepository
 
 
@@ -35,6 +41,32 @@ class BarberRepository(TenantScopedRepository):
                 Barber.is_active.is_(True),
                 BarberBranch.tenant_id == self.tenant_id,
                 BarberBranch.branch_id == branch_id,
+            )
+            .order_by(Barber.sort_order, Barber.name)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def list_active_for_branch_and_service(
+        self, branch_id: uuid.UUID, service_id: uuid.UUID
+    ) -> list[Barber]:
+        """INNER JOIN barber_branches (строгая связь — барбер обязан работать
+        в филиале) + LEFT JOIN barber_services (opt-out — барбер не должен
+        явно отказаться от услуги). См. docs/STAFF_SERVICE_BRANCH_DESIGN.md."""
+        stmt = (
+            select(Barber)
+            .join(BarberBranch, BarberBranch.barber_id == Barber.id)
+            .outerjoin(
+                BarberService,
+                (BarberService.barber_id == Barber.id)
+                & (BarberService.service_id == service_id)
+                & (BarberService.tenant_id == self.tenant_id),
+            )
+            .where(
+                Barber.tenant_id == self.tenant_id,
+                Barber.is_active.is_(True),
+                BarberBranch.tenant_id == self.tenant_id,
+                BarberBranch.branch_id == branch_id,
+                or_(BarberService.id.is_(None), BarberService.is_active.is_(True)),
             )
             .order_by(Barber.sort_order, Barber.name)
         )

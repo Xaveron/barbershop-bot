@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint, Uuid, true
 from sqlalchemy.orm import Mapped, mapped_column
@@ -10,9 +11,10 @@ from app.database.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrima
 
 class Branch(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Филиал (физическая точка) арендатора. Один Tenant может иметь несколько
-    Branch — в отличие от Tenant.timezone/currency/shop_* (Phase 1, ещё не
-    источник истины для бизнес-логики), name здесь реально используется и
-    уникально в пределах арендатора."""
+    Branch. name уникально в пределах арендатора. timezone читается
+    ScheduleService/BookingService начиная с Phase 4 (см.
+    docs/STAFF_SERVICE_BRANCH_DESIGN.md) — раньше вся бизнес-логика
+    использовала settings.tz независимо от филиала."""
 
     __tablename__ = "branches"
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_branches_tenant_id_name"),)
@@ -21,9 +23,6 @@ class Branch(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     address: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(String(32))
     maps_url: Mapped[str | None] = mapped_column(Text)
-    # Задел на будущее, как Tenant.timezone в Phase 1: не читается нигде в
-    # бизнес-логике этой фазы — ScheduleService/BookingService по-прежнему
-    # используют settings.tz (см. docs/BRANCHES_DESIGN.md).
     timezone: Mapped[str] = mapped_column(
         String(64), nullable=False, default="Europe/Chisinau", server_default="Europe/Chisinau"
     )
@@ -33,6 +32,10 @@ class Branch(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False, index=True
     )
+
+    @property
+    def tz(self) -> ZoneInfo:
+        return ZoneInfo(self.timezone)
 
 
 class BarberBranch(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):

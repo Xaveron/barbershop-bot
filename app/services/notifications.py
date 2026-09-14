@@ -55,7 +55,6 @@ class NotificationService:
         self.session_factory = session_factory
         self.settings = settings
         self.tenant_id = tenant_id
-        self.tz = settings.tz
 
     # --- Фоновая рассылка ---------------------------------------------------
     async def dispatch_due(self, *, batch_size: int = 30) -> tuple[int, int]:
@@ -122,7 +121,7 @@ class NotificationService:
         lang = client_language(appointment, self.settings)
         text = (
             f"{t(REMINDER_KEYS[notification.kind], lang)}\n\n"
-            f"{appointment_card(appointment, self.tz)}\n\n"
+            f"{appointment_card(appointment, appointment.branch.tz)}\n\n"
             f"📍 {esc(self.settings.shop_address)}"
         )
         try:
@@ -192,7 +191,7 @@ class NotificationService:
         lang = self.settings.default_language
         text = (
             f"{t('notify.new_appointment', lang)}\n\n"
-            f"{appointment_card(appointment, self.tz, lang=lang)}\n\n"
+            f"{appointment_card(appointment, appointment.branch.tz, lang=lang)}\n\n"
             f"👤 {esc(appointment.user.display_name)}"
         )
         if appointment.user.phone:
@@ -204,7 +203,7 @@ class NotificationService:
         key = "notify.cancelled_by_client" if by_client else "notify.cancelled_by_admin"
         text = (
             f"{t(key, lang)}\n\n"
-            f"{appointment_card(appointment, self.tz, lang=lang)}\n\n"
+            f"{appointment_card(appointment, appointment.branch.tz, lang=lang)}\n\n"
             f"👤 {esc(appointment.user.display_name)}"
         )
         await self.notify_admins(text)

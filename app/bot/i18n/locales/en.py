@@ -175,6 +175,11 @@ MESSAGES: dict[str, str] = {
     "error.barber_not_at_branch": (
         "This barber doesn't work at this location. Please pick another one."
     ),
+    "error.branch_unavailable": "This location is no longer available. Please pick another one.",
+    "error.service_not_at_branch": "This service isn't available at the selected location.",
+    "error.barber_not_provide_service": (
+        "This barber doesn't offer this service. Please pick another one."
+    ),
     "error.slot_busy": "This time is already taken. Please pick another one.",
     "error.slot_race": "Someone took this slot a second earlier. Please pick another one.",
     "error.create_failed": "Could not create the booking. Please try again.",

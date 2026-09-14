@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.database.models import ROLE_PERMISSIONS, Permission, Role, StaffMember
+from app.database.repositories import BranchRepository
 
 
 class AuthorizationError(Exception):
@@ -77,3 +80,24 @@ class AuthorizationService:
         if staff.role in (Role.TENANT_OWNER, Role.TENANT_ADMIN):
             return True
         return branch_id in accessible_branch_ids
+
+
+async def resolve_accessible_branch_ids(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    staff: StaffMember | None,
+    *,
+    is_super_admin: bool = False,
+) -> frozenset[uuid.UUID] | None:
+    """Единая точка входа для хендлеров admin/schedule.py и admin/appointments.py:
+    делает ОДИН поход в БД за сессию и возвращает то, что can_access_branch
+    ожидает как accessible_branch_ids. `None` означает «без ограничений»
+    (TENANT_OWNER/TENANT_ADMIN/платформенный SUPER_ADMIN) — отличает от
+    пустого frozenset() («сотруднику не назначен ни один филиал»)."""
+    if is_super_admin:
+        return None
+    if staff is None:
+        return frozenset()
+    if staff.role in (Role.TENANT_OWNER, Role.TENANT_ADMIN):
+        return None
+    return await BranchRepository(session, tenant_id).accessible_branch_ids_for_staff(staff.id)

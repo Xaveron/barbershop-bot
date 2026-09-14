@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, Integer, String, Text, UniqueConstraint, text, true
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -41,3 +53,32 @@ class Barber(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
     )
     appointments: Mapped[list[Appointment]] = relationship(back_populates="barber")
+
+
+class BarberService(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Барбер предоставляет услугу. Отсутствие строки для (barber_id, service_id)
+    означает «предоставляет» (тот же opt-out паттерн, что BranchService, — см.
+    docs/STAFF_SERVICE_BRANCH_DESIGN.md): любой барбер сегодня может выполнить
+    любую услугу, и бэкфилл строк по всем существующим парам сломал бы это на
+    новых барберах/услугах, требуя ручной настройки каждой комбинации. Строка
+    с is_active=false — точечный отказ конкретного барбера от конкретной услуги."""
+
+    __tablename__ = "barber_services"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "barber_id", "service_id",
+            name="uq_barber_services_tenant_id_barber_id_service_id",
+        ),
+    )
+
+    barber_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("barbers.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    service_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("services.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )

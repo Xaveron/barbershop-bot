@@ -435,10 +435,13 @@ async def test_available_slots_differ_per_branch_for_same_barber(
     day = (now_utc().astimezone(settings.tz) + timedelta(days=2)).date()
 
     async with session_factory() as session:
-        slots_a = await ScheduleService(session, settings, tenant_id, branch_a_id).available_slots(
+        branch_repo = BranchRepository(session, tenant_id)
+        branch_a = await branch_repo.get(branch_a_id)
+        branch_b = await branch_repo.get(branch_b_id)
+        slots_a = await ScheduleService(session, settings, tenant_id, branch_a).available_slots(
             barber_id=barber_id, day=day, duration_minutes=60
         )
-        slots_b = await ScheduleService(session, settings, tenant_id, branch_b_id).available_slots(
+        slots_b = await ScheduleService(session, settings, tenant_id, branch_b).available_slots(
             barber_id=barber_id, day=day, duration_minutes=60
         )
 

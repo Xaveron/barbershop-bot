@@ -1,5 +1,6 @@
 from app.database.repositories.appointment import AppointmentRepository
 from app.database.repositories.barber import BarberRepository
+from app.database.repositories.barber_service import BarberServiceRepository
 from app.database.repositories.branch import BranchRepository
 from app.database.repositories.notification import NotificationRepository
 from app.database.repositories.schedule import ScheduleRepository
@@ -11,6 +12,7 @@ from app.database.repositories.user import UserRepository
 __all__ = [
     "AppointmentRepository",
     "BarberRepository",
+    "BarberServiceRepository",
     "BranchRepository",
     "NotificationRepository",
     "ScheduleRepository",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 
 from sqlalchemy import Select, and_, func, select, update
@@ -14,6 +14,7 @@ from app.database.repositories.base import TenantScopedRepository
 def _with_relations(stmt: Select) -> Select:
     return stmt.options(
         joinedload(Appointment.user),
+        joinedload(Appointment.branch),
         joinedload(Appointment.barber),
         joinedload(Appointment.service),
     )
@@ -82,6 +83,7 @@ class AppointmentRepository(TenantScopedRepository):
         start: datetime,
         end: datetime,
         statuses: Sequence[AppointmentStatus] | None = None,
+        branch_ids: Collection[uuid.UUID] | None = None,
         limit: int = 200,
         offset: int = 0,
     ) -> list[Appointment]:
@@ -92,6 +94,8 @@ class AppointmentRepository(TenantScopedRepository):
         )
         if statuses:
             stmt = stmt.where(Appointment.status.in_(statuses))
+        if branch_ids is not None:
+            stmt = stmt.where(Appointment.branch_id.in_(branch_ids))
         stmt = _with_relations(stmt).order_by(Appointment.starts_at).limit(limit).offset(offset)
         return list((await self.session.scalars(stmt)).unique())
 
@@ -163,6 +167,7 @@ class AppointmentRepository(TenantScopedRepository):
         start: datetime,
         end: datetime,
         statuses: Sequence[AppointmentStatus] | None = None,
+        branch_ids: Collection[uuid.UUID] | None = None,
     ) -> int:
         stmt = (
             select(func.count())
@@ -175,6 +180,8 @@ class AppointmentRepository(TenantScopedRepository):
         )
         if statuses:
             stmt = stmt.where(Appointment.status.in_(statuses))
+        if branch_ids is not None:
+            stmt = stmt.where(Appointment.branch_id.in_(branch_ids))
         return await self.session.scalar(stmt) or 0
 
     async def revenue_between(self, *, start: datetime, end: datetime) -> float:

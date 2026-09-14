@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from zoneinfo import ZoneInfo
+
 from sqlalchemy import Boolean, String, Text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,10 +12,9 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Арендатор SaaS: один барбершоп.
 
     Phase 1: в базе ровно одна строка (единственный Telegram-бот, см.
-    app/main.py). Поля timezone/currency/shop_* дублируют одноимённые
-    настройки Settings и являются будущим источником истины — бизнес-логика
-    по-прежнему читает Settings, пока их не переключат в следующей фазе.
-    """
+    app/main.py). Поля shop_* остаются заделом (Settings — источник истины
+    для контактов барбершопа), но timezone используется как запасной вариант
+    при создании нового филиала без явно указанной зоны (см. BranchRepository.create)."""
 
     __tablename__ = "tenants"
 
@@ -32,3 +33,7 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
+
+    @property
+    def tz(self) -> ZoneInfo:
+        return ZoneInfo(self.timezone)

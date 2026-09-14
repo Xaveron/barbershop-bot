@@ -127,12 +127,12 @@ def confirm_kb(lang: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def my_appointments_kb(
-    appointments: Sequence[Appointment], tz, lang: str
-) -> InlineKeyboardMarkup:
+def my_appointments_kb(appointments: Sequence[Appointment], lang: str) -> InlineKeyboardMarkup:
+    """Часовой пояс берётся у каждой записи отдельно (appointment.branch.tz) —
+    список может включать записи из разных филиалов с разными зонами."""
     builder = InlineKeyboardBuilder()
     for appointment in appointments:
-        local = to_local(appointment.starts_at, tz)
+        local = to_local(appointment.starts_at, appointment.branch.tz)
         builder.button(
             text=f"{local.strftime('%d.%m')} {format_time(local)} · {appointment.service.name}",
             callback_data=ApptCB(action="view", id=str(appointment.id)),

@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.admin import (
+    admin_service_branches_kb,
     admin_service_kb,
     admin_services_kb,
     back_to_admin_kb,
@@ -23,7 +24,7 @@ from app.bot.states import AdminFieldSG, AdminServiceSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
 from app.database.models import Permission, Service
-from app.database.repositories import ServiceRepository
+from app.database.repositories import BranchRepository, ServiceRepository
 from app.utils.dt import format_duration
 from app.utils.text import esc, money
 from app.utils.validators import (
@@ -93,6 +94,76 @@ async def show_service(
     text, markup = service_card(service)
     await edit_message(callback, text, markup)
     await callback.answer()
+
+
+@router.callback_query(AdmCB.filter(F.action == "svc_branches"))
+async def show_service_branches(
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    await state.clear()
+    service = await _get_service(callback_data.arg, session, tenant_id)
+    if service is None:
+        await alert(callback, "Услуга не найдена.")
+        return
+    await state.update_data(service_id=str(service.id))
+    await _render_service_branches(callback, session, tenant_id, service)
+    await callback.answer()
+
+
+async def _render_service_branches(
+    callback: CallbackQuery, session: AsyncSession, tenant_id: uuid.UUID, service: Service
+) -> None:
+    branch_repo = BranchRepository(session, tenant_id)
+    branches = await branch_repo.list_active()
+    available_ids = {
+        branch.id
+        for branch in branches
+        if await branch_repo.service_available_at_branch(
+            service_id=service.id, branch_id=branch.id
+        )
+    }
+    text = f"📍 <b>{esc(service.name)}</b>\n\nДоступность по филиалам (нажмите, чтобы переключить):"
+    await edit_message(
+        callback, text, admin_service_branches_kb(service, branches, available_ids)
+    )
+
+
+@router.callback_query(AdmCB.filter(F.action == "svc_branch"))
+async def toggle_service_branch(
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    data = await state.get_data()
+    service_id = parse_uuid(data.get("service_id", ""))
+    branch_id = parse_uuid(callback_data.arg)
+    if service_id is None or branch_id is None:
+        await alert(callback, "Сессия устарела. Откройте /admin заново.")
+        return
+    service = await _get_service(str(service_id), session, tenant_id)
+    if service is None:
+        await alert(callback, "Услуга не найдена.")
+        return
+
+    branch_repo = BranchRepository(session, tenant_id)
+    currently_available = await branch_repo.service_available_at_branch(
+        service_id=service.id, branch_id=branch_id
+    )
+    link = await branch_repo.assign_service(
+        service_id=service.id, branch_id=branch_id, is_active=not currently_available
+    )
+    if link is None:
+        await alert(callback, "Не удалось изменить доступность.")
+        return
+    await session.commit()
+    await _render_service_branches(callback, session, tenant_id, service)
+    await callback.answer("Сохранено")
 
 
 # --- Создание услуги --------------------------------------------------------

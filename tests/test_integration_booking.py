@@ -1036,8 +1036,9 @@ async def test_available_days_does_not_query_per_day(
     """Горизонт 14 дней должен грузиться одним пакетом, а не запросом на день."""
     barber_id, _, _, branch_id = fixtures
     async with session_factory() as session:
+        branch = await BranchRepository(session, tenant_id).get(branch_id)
         query_counter.clear()
-        days = await ScheduleService(session, settings, tenant_id, branch_id).available_days(
+        days = await ScheduleService(session, settings, tenant_id, branch).available_days(
             barber_id=barber_id, duration_minutes=60
         )
 
@@ -1061,10 +1062,11 @@ async def test_booking_keeps_query_count_bounded(
         )
 
     inserts = [q for q in query_counter if q.lstrip().upper().startswith("INSERT")]
-    # 11 запросов: услуга, барбер, барбер-в-филиале, лимит активных записей,
+    # 14 запросов: услуга, барбер, филиал, барбер-в-филиале,
+    # услуга-в-филиале, барбер-предоставляет-услугу, лимит активных записей,
     # advisory-lock клиента, advisory-lock барбера, график, исключения,
     # занятые слоты и два INSERT-а.
-    assert len(query_counter) <= 11, query_counter
+    assert len(query_counter) <= 14, query_counter
     # Оба напоминания создаются одним INSERT-ом вместе с записью.
     assert len(inserts) == 2, inserts
 

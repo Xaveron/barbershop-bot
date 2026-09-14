@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.admin import (
+    admin_barber_branches_kb,
     admin_barber_kb,
     admin_barbers_kb,
     back_to_admin_kb,
@@ -91,6 +92,77 @@ async def show_barber(
     text, markup = await barber_card(barber, session, tenant_id)
     await edit_message(callback, text, markup)
     await callback.answer()
+
+
+@router.callback_query(AdmCB.filter(F.action == "brb_branches"))
+async def show_barber_branches(
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    await state.clear()
+    barber = await _get_barber(callback_data.arg, session, tenant_id)
+    if barber is None:
+        await alert(callback, "Барбер не найден.")
+        return
+    await state.update_data(barber_id=str(barber.id))
+    await _render_barber_branches(callback, session, tenant_id, barber)
+    await callback.answer()
+
+
+async def _render_barber_branches(
+    callback: CallbackQuery, session: AsyncSession, tenant_id: uuid.UUID, barber: Barber
+) -> None:
+    branch_repo = BranchRepository(session, tenant_id)
+    branches = await branch_repo.list_active()
+    assigned = await branch_repo.list_for_barber(barber.id)
+    assigned_ids = {branch.id for branch in assigned}
+    text = f"📍 <b>{esc(barber.name)}</b>\n\nФилиалы (нажмите, чтобы привязать/отвязать):"
+    await edit_message(callback, text, admin_barber_branches_kb(barber, branches, assigned_ids))
+
+
+@router.callback_query(AdmCB.filter(F.action == "brb_branch"))
+async def toggle_barber_branch(
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+) -> None:
+    data = await state.get_data()
+    barber_id = parse_uuid(data.get("barber_id", ""))
+    branch_id = parse_uuid(callback_data.arg)
+    if barber_id is None or branch_id is None:
+        await alert(callback, "Сессия устарела. Откройте /admin заново.")
+        return
+    barber = await _get_barber(str(barber_id), session, tenant_id)
+    if barber is None:
+        await alert(callback, "Барбер не найден.")
+        return
+
+    branch_repo = BranchRepository(session, tenant_id)
+    assigned = await branch_repo.list_for_barber(barber.id)
+    assigned_ids = {branch.id for branch in assigned}
+
+    if branch_id in assigned_ids:
+        if len(assigned_ids) <= 1:
+            await alert(
+                callback,
+                "Нельзя убрать последний филиал — барбера будет невозможно "
+                "записать или задать ему график. Сначала привяжите другой филиал.",
+            )
+            return
+        await branch_repo.unassign_barber(barber_id=barber.id, branch_id=branch_id)
+    else:
+        link = await branch_repo.assign_barber(barber_id=barber.id, branch_id=branch_id)
+        if link is None:
+            await alert(callback, "Не удалось привязать филиал.")
+            return
+    await session.commit()
+    await _render_barber_branches(callback, session, tenant_id, barber)
+    await callback.answer("Сохранено")
 
 
 @router.callback_query(AdmCB.filter(F.action == "brb_add"))

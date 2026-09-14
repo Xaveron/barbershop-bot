@@ -26,7 +26,10 @@ def _menu_kb(is_super_admin: bool, staff: StaffMember | None):
     can_manage_branches = AuthorizationService.has_permission(
         staff, Permission.MANAGE_BRANCHES, is_super_admin=is_super_admin
     )
-    return admin_menu_kb(can_manage_branches=can_manage_branches)
+    can_view_staff = AuthorizationService.has_permission(
+        staff, Permission.VIEW_STAFF, is_super_admin=is_super_admin
+    )
+    return admin_menu_kb(can_manage_branches=can_manage_branches, can_view_staff=can_view_staff)
 
 
 @router.message(Command("admin"))

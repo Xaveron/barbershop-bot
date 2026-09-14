@@ -51,6 +51,7 @@ from app.database.models import (
     Appointment,
     AppointmentStatus,
     Barber,
+    Branch,
     ScheduleException,
     Service,
 )
@@ -201,10 +202,11 @@ def make_appointment() -> Appointment:
     )
     appointment.service = service
     appointment.barber = barber
+    appointment.branch = Branch(id=uuid.uuid4(), name="Филиал", timezone="Europe/Chisinau")
     return appointment
 
 
-def test_keyboards_produce_valid_callback_data(tz):
+def test_keyboards_produce_valid_callback_data():
     sample = str(uuid.uuid4())
     service, barber = make_service(), make_barber()
     appointment = make_appointment()
@@ -218,7 +220,7 @@ def test_keyboards_produce_valid_callback_data(tz):
         barbers_kb([barber], "ru"),
         days_kb([date(2026, 9, 15)], "ru", back_to="service"),
         times_kb([local(2026, 9, 15, 9, 5)], "ru", back_to="day"),
-        my_appointments_kb([appointment], tz, "ru"),
+        my_appointments_kb([appointment], "ru"),
         admin_services_kb([service]),
         admin_service_kb(service),
         admin_barbers_kb([barber]),
@@ -226,7 +228,7 @@ def test_keyboards_produce_valid_callback_data(tz):
         week_kb(sample, dict.fromkeys(range(7))),
         weekday_actions_kb(sample, 6),
         exceptions_kb([exception]),
-        admin_appointments_kb([appointment], tz, page=0, has_next=True),
+        admin_appointments_kb([appointment], page=0, has_next=True),
         admin_appointment_kb(sample),
     ]
     for keyboard in keyboards:

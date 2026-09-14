@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.admin import (
     back_to_admin_kb,
     barber_picker_kb,
+    branch_picker_kb,
     exceptions_kb,
     week_kb,
     weekday_actions_kb,
@@ -25,8 +26,9 @@ from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import AdminExceptionSG, AdminScheduleSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
-from app.database.models import Branch, Permission
+from app.database.models import Branch, Permission, StaffMember
 from app.database.repositories import BarberRepository, BranchRepository, ScheduleRepository
+from app.services.authorization import resolve_accessible_branch_ids
 from app.services.schedule import ScheduleService
 from app.utils.dt import WEEKDAYS_FULL, format_time, today_in
 from app.utils.text import esc
@@ -38,6 +40,25 @@ router.message.filter(RequirePermission(Permission.MANAGE_SCHEDULE))
 router.callback_query.filter(RequirePermission(Permission.MANAGE_SCHEDULE))
 
 EXCEPTIONS_HORIZON_DAYS = 180
+
+
+async def _accessible_branch_ids(
+    callback: CallbackQuery, session: AsyncSession, settings: Settings,
+    tenant_id: uuid.UUID, staff: StaffMember | None,
+) -> frozenset[uuid.UUID] | None:
+    is_super_admin = bool(callback.from_user and settings.is_admin(callback.from_user.id))
+    return await resolve_accessible_branch_ids(
+        session, tenant_id, staff, is_super_admin=is_super_admin
+    )
+
+
+def _restrict(branches: list[Branch], accessible: frozenset[uuid.UUID] | None) -> list[Branch]:
+    """accessible=None означает «без ограничений» (TENANT_OWNER/TENANT_ADMIN/
+    платформенный SUPER_ADMIN) — иначе оставляем только доступные сотруднику филиалы
+    (см. docs/STAFF_SERVICE_BRANCH_DESIGN.md, RBAC branch-scope enforcement)."""
+    if accessible is None:
+        return branches
+    return [b for b in branches if b.id in accessible]
 
 
 # --- Рабочие часы -----------------------------------------------------------
@@ -58,6 +79,41 @@ async def pick_barber_for_schedule(
     await callback.answer()
 
 
+async def _enter_barber_schedule(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    staff: StaffMember | None,
+    barber_id: uuid.UUID,
+) -> None:
+    """Общая точка входа после выбора барбера: резолвит его филиалы,
+    сужает до доступных сотруднику, авто-выбирает единственный (без нового
+    UX для сегодняшних одно-филиальных барберов) либо просит выбрать."""
+    barber = await BarberRepository(session, tenant_id).get(barber_id)
+    if barber is None:
+        await alert(callback, "Барбер не найден.")
+        return
+    await state.update_data(barber_id=str(barber.id))
+
+    branches = await BranchRepository(session, tenant_id).list_for_barber(barber.id)
+    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    candidates = _restrict(branches, accessible)
+    if not candidates:
+        await alert(callback, "Нет доступных вам филиалов для этого барбера.")
+        return
+    if len(candidates) == 1:
+        await state.update_data(branch_id=str(candidates[0].id))
+        await _show_week_view(callback, session, settings, tenant_id, barber.id, candidates[0])
+        return
+    await edit_message(
+        callback,
+        f"🕐 <b>{esc(barber.name)}</b>\n\nВыберите филиал:",
+        branch_picker_kb(candidates, "sch_pick_branch", back="schedule"),
+    )
+
+
 @router.callback_query(AdmCB.filter(F.action == "sch_barber"))
 async def show_week(
     callback: CallbackQuery,
@@ -66,26 +122,68 @@ async def show_week(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     await state.clear()
     barber_id = parse_uuid(callback_data.arg)
-    barber = await BarberRepository(session, tenant_id).get(barber_id) if barber_id else None
+    if barber_id is None:
+        await alert(callback, "Барбер не найден.")
+        return
+    await _enter_barber_schedule(callback, state, session, settings, tenant_id, staff, barber_id)
+    await callback.answer()
+
+
+@router.callback_query(AdmCB.filter(F.action == "sch_pick_branch"))
+async def pick_branch_for_schedule(
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    staff: StaffMember | None,
+) -> None:
+    data = await state.get_data()
+    barber_id = parse_uuid(data.get("barber_id", ""))
+    branch_id = parse_uuid(callback_data.arg)
+    if barber_id is None or branch_id is None:
+        await alert(callback, "Сессия устарела. Откройте /admin заново.")
+        return
+    branch = await BranchRepository(session, tenant_id).get_active(branch_id)
+    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    if (
+        branch is None
+        or not await BranchRepository(session, tenant_id).barber_works_at_branch(
+            barber_id=barber_id, branch_id=branch_id
+        )
+        or (accessible is not None and branch_id not in accessible)
+    ):
+        await alert(callback, "Недостаточно прав или филиал недоступен.")
+        return
+    await state.update_data(branch_id=str(branch.id))
+    await _show_week_view(callback, session, settings, tenant_id, barber_id, branch)
+    await callback.answer()
+
+
+async def _show_week_view(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    barber_id: uuid.UUID,
+    branch: Branch,
+) -> None:
+    barber = await BarberRepository(session, tenant_id).get(barber_id)
     if barber is None:
         await alert(callback, "Барбер не найден.")
         return
-    branch = await _resolve_branch_for_barber(session, tenant_id, barber.id)
-    if branch is None:
-        await alert(callback, "Барбер не привязан ни к одному филиалу.")
-        return
-    summary = await ScheduleService(session, settings, tenant_id, branch.id).week_summary(
-        barber.id
-    )
+    summary = await ScheduleService(session, settings, tenant_id, branch).week_summary(barber.id)
+    title = f"🕐 <b>График: {esc(barber.name)}</b> — 📍{esc(branch.name)}"
     await edit_message(
         callback,
-        f"🕐 <b>График: {esc(barber.name)}</b>\n\nВыберите день недели для изменения:",
+        f"{title}\n\nВыберите день недели для изменения:",
         week_kb(str(barber.id), summary),
     )
-    await callback.answer()
 
 
 @router.callback_query(AdmDayCB.filter())
@@ -96,18 +194,18 @@ async def show_weekday(
     session: AsyncSession,
     tenant_id: uuid.UUID,
 ) -> None:
-    await state.clear()
     barber_id = parse_uuid(callback_data.barber)
     barber = await BarberRepository(session, tenant_id).get(barber_id) if barber_id else None
     if barber is None or not 0 <= callback_data.weekday <= 6:
         await alert(callback, "Барбер не найден.")
         return
-    branch = await _resolve_branch_for_barber(session, tenant_id, barber.id)
-    if branch is None:
-        await alert(callback, "Барбер не привязан ни к одному филиалу.")
+    data = await state.get_data()
+    branch_id = parse_uuid(data.get("branch_id", ""))
+    if branch_id is None:
+        await alert(callback, "Сессия устарела. Откройте /admin заново.")
         return
     record = await ScheduleRepository(session, tenant_id).get_day(
-        barber.id, branch.id, callback_data.weekday
+        barber.id, branch_id, callback_data.weekday
     )
     current = (
         f"{format_time(record.start_time)}-{format_time(record.end_time)}"
@@ -156,16 +254,17 @@ async def save_hours(
         return
     data = await state.get_data()
     barber_id = parse_uuid(data.get("barber_id", ""))
+    branch_id = parse_uuid(data.get("branch_id", ""))
     weekday = int(data.get("weekday", -1))
-    if barber_id is None or not 0 <= weekday <= 6:
+    if barber_id is None or branch_id is None or not 0 <= weekday <= 6:
         await state.clear()
         await message.answer("Сессия устарела. Откройте /admin заново.")
         return
 
-    await state.clear()
-    branch = await _resolve_branch_for_barber(session, tenant_id, barber_id)
+    branch = await BranchRepository(session, tenant_id).get_active(branch_id)
     if branch is None:
-        await message.answer("Барбер не привязан ни к одному филиалу.")
+        await state.clear()
+        await message.answer("Филиал не найден.")
         return
     try:
         record = await ScheduleRepository(session, tenant_id).set_day(
@@ -182,9 +281,11 @@ async def save_hours(
         await message.answer("⚠️ Не удалось сохранить график.")
         return
 
-    summary = await ScheduleService(session, settings, tenant_id, branch.id).week_summary(
-        barber_id
-    )
+    # Оставляем barber_id/branch_id в состоянии: продолжение редактирования
+    # графика (следующий день недели) не должно требовать выбора филиала заново.
+    await state.set_state(None)
+    await state.update_data(barber_id=str(barber_id), branch_id=str(branch.id))
+    summary = await ScheduleService(session, settings, tenant_id, branch).week_summary(barber_id)
     await message.answer(
         f"✅ {WEEKDAYS_FULL[weekday]}: {format_time(start)}-{format_time(end)}",
         reply_markup=week_kb(str(barber_id), summary),
@@ -195,6 +296,7 @@ async def save_hours(
 async def set_day_off(
     callback: CallbackQuery,
     callback_data: AdmCB,
+    state: FSMContext,
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
@@ -204,15 +306,15 @@ async def set_day_off(
         await alert(callback, "Некорректные данные.")
         return
     barber_id, weekday = parsed
-    branch = await _resolve_branch_for_barber(session, tenant_id, barber_id)
+    data = await state.get_data()
+    branch_id = parse_uuid(data.get("branch_id", ""))
+    branch = await BranchRepository(session, tenant_id).get_active(branch_id) if branch_id else None
     if branch is None:
-        await alert(callback, "Барбер не привязан ни к одному филиалу.")
+        await alert(callback, "Сессия устарела. Откройте /admin заново.")
         return
     await ScheduleRepository(session, tenant_id).clear_day(barber_id, branch.id, weekday)
     await session.commit()
-    summary = await ScheduleService(session, settings, tenant_id, branch.id).week_summary(
-        barber_id
-    )
+    summary = await ScheduleService(session, settings, tenant_id, branch).week_summary(barber_id)
     await edit_message(
         callback,
         f"✅ {WEEKDAYS_FULL[weekday]} теперь выходной.",
@@ -229,10 +331,12 @@ async def show_exceptions(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     await state.clear()
     today = today_in(settings.tz)
-    branches = await BranchRepository(session, tenant_id).list_active()
+    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branches = _restrict(await BranchRepository(session, tenant_id).list_active(), accessible)
     exceptions: list = []
     branch_names: dict[uuid.UUID, str] = {}
     repository = ScheduleRepository(session, tenant_id)
@@ -291,20 +395,84 @@ async def add_exception_start(
 
 @router.callback_query(AdmCB.filter(F.action == "exc_who"))
 async def add_exception_pick_date(
-    callback: CallbackQuery, callback_data: AdmCB, state: FSMContext
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     scope = callback_data.arg
-    if scope != "all" and parse_uuid(scope) is None:
+    barber_id = None if scope == "all" else parse_uuid(scope)
+    if scope != "all" and barber_id is None:
         await alert(callback, "Некорректный выбор.")
         return
-    await state.set_state(AdminExceptionSG.date)
     await state.update_data(scope=scope)
+
+    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    if barber_id is None:
+        candidates = _restrict(await BranchRepository(session, tenant_id).list_active(), accessible)
+    else:
+        candidates = _restrict(
+            await BranchRepository(session, tenant_id).list_for_barber(barber_id), accessible
+        )
+    if not candidates:
+        await alert(callback, "Нет доступных вам филиалов.")
+        return
+    if len(candidates) > 1:
+        await edit_message(
+            callback,
+            "Выберите филиал:",
+            branch_picker_kb(candidates, "exc_pick_branch", back="exceptions"),
+        )
+        await callback.answer()
+        return
+
+    await state.update_data(branch_id=str(candidates[0].id))
+    await _ask_exception_date(callback, state)
+    await callback.answer()
+
+
+@router.callback_query(AdmCB.filter(F.action == "exc_pick_branch"))
+async def pick_branch_for_exception(
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    staff: StaffMember | None,
+) -> None:
+    data = await state.get_data()
+    scope = data.get("scope")
+    branch_id = parse_uuid(callback_data.arg)
+    if not scope or branch_id is None:
+        await alert(callback, "Сессия устарела. Откройте /admin заново.")
+        return
+    branch = await BranchRepository(session, tenant_id).get_active(branch_id)
+    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    if branch is None or (accessible is not None and branch_id not in accessible):
+        await alert(callback, "Недостаточно прав или филиал недоступен.")
+        return
+    barber_id = None if scope == "all" else parse_uuid(scope)
+    if barber_id is not None and not await BranchRepository(
+        session, tenant_id
+    ).barber_works_at_branch(barber_id=barber_id, branch_id=branch_id):
+        await alert(callback, "Барбер не работает в этом филиале.")
+        return
+    await state.update_data(branch_id=str(branch.id))
+    await _ask_exception_date(callback, state)
+    await callback.answer()
+
+
+async def _ask_exception_date(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminExceptionSG.date)
     await edit_message(
         callback,
         "Отправьте дату в формате ДД.ММ.ГГГГ, например 31.12.2026\n\nДля отмены: /cancel",
         back_to_admin_kb("exceptions"),
     )
-    await callback.answer()
 
 
 @router.message(AdminExceptionSG.date)
@@ -387,6 +555,7 @@ async def delete_exception(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
 ) -> None:
     exception_id = parse_uuid(callback_data.arg)
     repository = ScheduleRepository(session, tenant_id)
@@ -394,10 +563,14 @@ async def delete_exception(
     if exception is None:
         await alert(callback, "Исключение не найдено.")
         return
+    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    if accessible is not None and exception.branch_id not in accessible:
+        await alert(callback, "Недостаточно прав.")
+        return
     await repository.delete_exception(exception)
     await session.commit()
     await callback.answer("Удалено")
-    await show_exceptions(callback, state, session, settings, tenant_id)
+    await show_exceptions(callback, state, session, settings, tenant_id, staff)
 
 
 # --- Вспомогательное --------------------------------------------------------
@@ -426,22 +599,16 @@ async def _save_exception(
     data = await state.get_data()
     scope = data.get("scope")
     raw_date = data.get("date")
-    if not scope or not raw_date:
+    branch_id = parse_uuid(data.get("branch_id", ""))
+    if not scope or not raw_date or branch_id is None:
         return False
     barber_id = None if scope == "all" else parse_uuid(scope)
     if scope != "all" and barber_id is None:
         return False
 
-    if barber_id is None:
-        branch = await _resolve_default_branch(session, tenant_id)
-    else:
-        branch = await _resolve_branch_for_barber(session, tenant_id, barber_id)
-    if branch is None:
-        return False
-
     try:
         saved = await ScheduleRepository(session, tenant_id).upsert_exception(
-            branch_id=branch.id,
+            branch_id=branch_id,
             barber_id=barber_id,
             exception_date=date_type.fromisoformat(raw_date),
             is_day_off=is_day_off,
@@ -457,23 +624,3 @@ async def _save_exception(
         logger.exception("Не удалось сохранить исключение")
         return False
     return True
-
-
-# --- Резолв филиала по барберу/арендатору ------------------------------------
-async def _resolve_branch_for_barber(
-    session: AsyncSession, tenant_id: uuid.UUID, barber_id: uuid.UUID
-) -> Branch | None:
-    """Хендлеры графика работают с барбером, но график теперь принадлежит
-    филиалу. Сегодня (Phase 3) UI не даёт привязать барбера больше чем к
-    одному филиалу, так что берём первый — для реального многофилиального
-    сценария полноценный picker появится отдельным инкрементом."""
-    branches = await BranchRepository(session, tenant_id).list_for_barber(barber_id)
-    return branches[0] if branches else None
-
-
-async def _resolve_default_branch(session: AsyncSession, tenant_id: uuid.UUID) -> Branch | None:
-    """«Весь филиал» для исключений без привязки к барберу: однозначно только
-    когда у арендатора один активный филиал — как и everywhere else в Phase 3,
-    поведение для сегодняшних однофилиальных арендаторов не меняется."""
-    branches = await BranchRepository(session, tenant_id).list_active()
-    return branches[0] if len(branches) == 1 else None

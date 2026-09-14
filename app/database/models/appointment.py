@@ -24,6 +24,7 @@ from app.database.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrima
 
 if TYPE_CHECKING:
     from app.database.models.barber import Barber
+    from app.database.models.branch import Branch
     from app.database.models.notification import Notification
     from app.database.models.service import Service
     from app.database.models.user import User
@@ -135,6 +136,7 @@ class Appointment(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     user: Mapped[User] = relationship(back_populates="appointments", lazy="joined")
+    branch: Mapped[Branch] = relationship(lazy="joined")
     barber: Mapped[Barber] = relationship(back_populates="appointments", lazy="joined")
     service: Mapped[Service] = relationship(back_populates="appointments", lazy="joined")
     notifications: Mapped[list[Notification]] = relationship(

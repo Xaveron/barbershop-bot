@@ -4,8 +4,17 @@ import uuid
 
 from sqlalchemy import func, select
 
-from app.database.models import Barber, BarberBranch, Branch, BranchService, Service, StaffBranch
+from app.database.models import (
+    Barber,
+    BarberBranch,
+    Branch,
+    BranchService,
+    Service,
+    StaffBranch,
+    StaffMember,
+)
 from app.database.repositories.base import TenantScopedRepository
+from app.database.repositories.tenant import TenantRepository
 
 
 class BranchRepository(TenantScopedRepository):
@@ -35,9 +44,23 @@ class BranchRepository(TenantScopedRepository):
         return list(await self.session.scalars(stmt))
 
     async def create(
-        self, *, name: str, address: str | None = None, phone: str | None = None
+        self,
+        *,
+        name: str,
+        address: str | None = None,
+        phone: str | None = None,
+        timezone: str | None = None,
     ) -> Branch:
-        branch = Branch(tenant_id=self.tenant_id, name=name, address=address, phone=phone)
+        """timezone по умолчанию наследуется от арендатора, а не от жёстко
+        зашитого дефолта колонки — иначе филиал в арендаторе с нестандартным
+        часовым поясом молча получил бы неверную зону (см.
+        docs/STAFF_SERVICE_BRANCH_DESIGN.md)."""
+        if timezone is None:
+            tenant = await TenantRepository(self.session).get(self.tenant_id)
+            timezone = tenant.timezone if tenant is not None else "Europe/Chisinau"
+        branch = Branch(
+            tenant_id=self.tenant_id, name=name, address=address, phone=phone, timezone=timezone
+        )
         self.session.add(branch)
         await self.session.flush()
         return branch
@@ -109,13 +132,82 @@ class BranchRepository(TenantScopedRepository):
     async def service_available_at_branch(
         self, *, service_id: uuid.UUID, branch_id: uuid.UUID
     ) -> bool:
-        stmt = select(func.count()).select_from(BranchService).where(
+        """Отсутствие строки означает «доступна» (opt-out, см. docстроку
+        BranchService) — раньше здесь по ошибке возвращался False при
+        отсутствии строки; метод нигде не вызывался, поэтому баг ни разу не
+        сработал (см. docs/STAFF_SERVICE_BRANCH_DESIGN.md)."""
+        stmt = select(BranchService.is_active).where(
             BranchService.tenant_id == self.tenant_id,
             BranchService.branch_id == branch_id,
             BranchService.service_id == service_id,
-            BranchService.is_active.is_(True),
         )
-        return bool(await self.session.scalar(stmt))
+        row = await self.session.scalar(stmt)
+        return True if row is None else row
+
+    async def unassign_barber(self, *, barber_id: uuid.UUID, branch_id: uuid.UUID) -> bool:
+        link = await self.session.scalar(
+            select(BarberBranch).where(
+                BarberBranch.tenant_id == self.tenant_id,
+                BarberBranch.barber_id == barber_id,
+                BarberBranch.branch_id == branch_id,
+            )
+        )
+        if link is None:
+            return False
+        await self.session.delete(link)
+        await self.session.flush()
+        return True
+
+    async def assign_staff(
+        self, *, staff_member_id: uuid.UUID, branch_id: uuid.UUID
+    ) -> StaffBranch | None:
+        """Тот же guard-паттерн, что assign_barber, но для доступа сотрудника к филиалу."""
+        if not await self._belongs_to_tenant(StaffMember, staff_member_id):
+            return None
+        if not await self._belongs_to_tenant(Branch, branch_id):
+            return None
+        existing = await self.session.scalar(
+            select(StaffBranch).where(
+                StaffBranch.tenant_id == self.tenant_id,
+                StaffBranch.staff_member_id == staff_member_id,
+                StaffBranch.branch_id == branch_id,
+            )
+        )
+        if existing is not None:
+            return existing
+        link = StaffBranch(
+            tenant_id=self.tenant_id, staff_member_id=staff_member_id, branch_id=branch_id
+        )
+        self.session.add(link)
+        await self.session.flush()
+        return link
+
+    async def unassign_staff(self, *, staff_member_id: uuid.UUID, branch_id: uuid.UUID) -> bool:
+        link = await self.session.scalar(
+            select(StaffBranch).where(
+                StaffBranch.tenant_id == self.tenant_id,
+                StaffBranch.staff_member_id == staff_member_id,
+                StaffBranch.branch_id == branch_id,
+            )
+        )
+        if link is None:
+            return False
+        await self.session.delete(link)
+        await self.session.flush()
+        return True
+
+    async def list_branches_for_staff(self, staff_member_id: uuid.UUID) -> list[Branch]:
+        stmt = (
+            select(Branch)
+            .join(StaffBranch, StaffBranch.branch_id == Branch.id)
+            .where(
+                Branch.tenant_id == self.tenant_id,
+                StaffBranch.tenant_id == self.tenant_id,
+                StaffBranch.staff_member_id == staff_member_id,
+            )
+            .order_by(Branch.name)
+        )
+        return list(await self.session.scalars(stmt))
 
     async def list_for_barber(self, barber_id: uuid.UUID) -> list[Branch]:
         stmt = (

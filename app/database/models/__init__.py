@@ -1,6 +1,6 @@
 from app.database.models.appointment import Appointment, AppointmentStatus, CancelledBy
 from app.database.models.audit import AuditLogEntry
-from app.database.models.barber import Barber
+from app.database.models.barber import Barber, BarberService
 from app.database.models.branch import BarberBranch, Branch, BranchService, StaffBranch
 from app.database.models.notification import Notification, NotificationKind, NotificationStatus
 from app.database.models.schedule import ScheduleException, WorkingSchedule
@@ -16,6 +16,7 @@ __all__ = [
     "AuditLogEntry",
     "Barber",
     "BarberBranch",
+    "BarberService",
     "Branch",
     "BranchService",
     "CancelledBy",

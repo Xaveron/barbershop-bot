@@ -58,7 +58,7 @@ async def render_my_appointments(
     await edit_message(
         callback,
         t("appointments.title", lang, count=len(appointments)),
-        my_appointments_kb(appointments, settings.tz, lang),
+        my_appointments_kb(appointments, lang),
     )
 
 
@@ -97,7 +97,7 @@ async def view_appointment(
         return
     await edit_message(
         callback,
-        appointment_card(appointment, settings.tz, with_status=True, lang=lang),
+        appointment_card(appointment, appointment.branch.tz, with_status=True, lang=lang),
         appointment_actions_kb(str(appointment.id), lang),
     )
     await callback.answer()
@@ -121,7 +121,7 @@ async def ask_cancel(
         callback,
         t("appointments.cancel_question", lang)
         + "\n\n"
-        + appointment_card(appointment, settings.tz, lang=lang),
+        + appointment_card(appointment, appointment.branch.tz, lang=lang),
         cancel_confirm_kb(str(appointment.id), lang),
     )
     await callback.answer()
@@ -161,7 +161,7 @@ async def do_cancel(
         callback,
         t("appointments.cancelled_title", lang)
         + "\n\n"
-        + appointment_card(appointment, settings.tz, lang=lang),
+        + appointment_card(appointment, appointment.branch.tz, lang=lang),
         main_menu_kb(lang, is_admin=is_admin),
     )
     await callback.answer(t("appointments.cancelled_toast", lang))
@@ -206,7 +206,7 @@ async def _render_reschedule_days(
         await alert(callback, t("appointments.not_found", lang))
         await state.clear()
         return
-    schedule = ScheduleService(session, settings, tenant_id, appointment.branch_id)
+    schedule = ScheduleService(session, settings, tenant_id, appointment.branch)
     days = await schedule.available_days(
         barber_id=appointment.barber_id,
         duration_minutes=appointment.duration_minutes,
@@ -224,7 +224,7 @@ async def _render_reschedule_days(
     await edit_message(
         callback,
         f"{t('appointments.move_title', lang)}\n"
-        f"{appointment_card(appointment, settings.tz, lang=lang)}\n\n"
+        f"{appointment_card(appointment, appointment.branch.tz, lang=lang)}\n\n"
         f"{t('appointments.move_choose_day', lang)}",
         days_kb(days, lang, back_to="my"),
     )
@@ -265,7 +265,7 @@ async def _render_reschedule_times(
         await state.clear()
         return
     day = date.fromisoformat(data["day"])
-    schedule = ScheduleService(session, settings, tenant_id, appointment.branch_id)
+    schedule = ScheduleService(session, settings, tenant_id, appointment.branch)
     slots = await schedule.available_slots(
         barber_id=appointment.barber_id,
         day=day,
@@ -319,7 +319,7 @@ async def reschedule_pick_time(
         await alert(callback, t("booking.bad_time", lang))
         return
 
-    start_local = combine_local(date.fromisoformat(data["day"]), chosen, settings.tz)
+    start_local = combine_local(date.fromisoformat(data["day"]), chosen, appointment.branch.tz)
     await state.update_data(time=callback_data.value)
     await state.set_state(RescheduleSG.confirm)
     summary = summary_block(
@@ -362,8 +362,14 @@ async def reschedule_confirm(
         return
 
     await state.clear()
-    start_local = combine_local(date.fromisoformat(day_raw), hhmm_to_time(time_raw), settings.tz)
     booking = BookingService(session, settings, tenant_id)
+    existing = await booking.get_appointment(appointment_id)
+    if existing is None:
+        await alert(callback, t("appointments.not_found", lang))
+        return
+    start_local = combine_local(
+        date.fromisoformat(day_raw), hhmm_to_time(time_raw), existing.branch.tz
+    )
     try:
         appointment = await booking.reschedule_appointment(
             appointment_id=appointment_id,
@@ -380,7 +386,7 @@ async def reschedule_confirm(
         callback,
         t("appointments.moved_title", lang)
         + "\n\n"
-        + appointment_card(appointment, settings.tz, lang=lang),
+        + appointment_card(appointment, appointment.branch.tz, lang=lang),
         main_menu_kb(lang, is_admin=is_admin),
     )
     await callback.answer(t("booking.done", lang))
@@ -392,7 +398,7 @@ async def reschedule_confirm(
             appointment.user.telegram_id,
             t("appointments.moved_by_shop", client_lang)
             + "\n\n"
-            + appointment_card(appointment, settings.tz, lang=client_lang)
+            + appointment_card(appointment, appointment.branch.tz, lang=client_lang)
             + "\n\n"
             + t("appointments.questions", client_lang, phone=esc(settings.shop_phone)),
         )
@@ -401,7 +407,7 @@ async def reschedule_confirm(
         await notifier.notify_admins(
             t("notify.client_moved", admin_lang)
             + "\n\n"
-            + appointment_card(appointment, settings.tz, lang=admin_lang)
+            + appointment_card(appointment, appointment.branch.tz, lang=admin_lang)
             + f"\n\n👤 {esc(appointment.user.display_name)}"
         )
 

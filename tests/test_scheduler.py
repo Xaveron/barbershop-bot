@@ -33,7 +33,7 @@ from app.database.models import (
 from app.scheduler.jobs import complete_past_appointments, send_due_reminders
 from app.services.notifications import NotificationService
 from app.utils.dt import now_utc
-from tests.conftest import local
+from tests.conftest import TZ, local
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
@@ -73,6 +73,7 @@ def _make_appointment_mock(
     appt.duration_minutes = 60
     appt.service.name = "Стрижка"
     appt.barber.name = "Иван"
+    appt.branch.tz = TZ
     appt.user.telegram_id = telegram_id
     appt.user.language_code = lang
     appt.user.is_blocked = is_blocked
