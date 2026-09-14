@@ -15,7 +15,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.database import build_engine, build_session_factory, wait_for_database
 from app.database.models import Barber, Service, WorkingSchedule
-from app.utils.logging import setup_logging
+from app.utils.logging import mask_secrets, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +69,13 @@ DEFAULT_WEEK: dict[int, tuple[time, time]] = {
 async def seed() -> None:
     settings = get_settings()
     setup_logging(settings.log_level)
-    engine = build_engine(settings.database_url)
-    session_factory = build_session_factory(engine)
-    await wait_for_database(engine)
+    try:
+        engine = build_engine(settings.database_url)
+        session_factory = build_session_factory(engine)
+        await wait_for_database(engine)
+    except Exception as exc:
+        logger.error("Не удалось подключиться к базе данных: %s", mask_secrets(str(exc)))
+        return
 
     async with session_factory() as session:
         for payload in DEFAULT_SERVICES:

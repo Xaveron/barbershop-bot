@@ -28,7 +28,7 @@ from app.bot.middlewares import (
 from app.config import Settings, get_settings
 from app.database import build_engine, build_session_factory, wait_for_database
 from app.scheduler import build_scheduler
-from app.utils.logging import setup_logging
+from app.utils.logging import mask_secrets, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +62,9 @@ def build_dispatcher(settings: Settings, session_factory) -> Dispatcher:
     dispatcher["settings"] = settings
     dispatcher["session_factory"] = session_factory
 
-    # Порядок важен: только личные чаты → троттлинг → сессия БД → пользователь.
-    dispatcher.update.outer_middleware(PrivateChatOnlyMiddleware(settings.default_language))
+    # Порядок важен: троттлинг → только личные чаты → сессия БД → пользователь.
+    # Троттлинг стоит первым, чтобы флуд командами в группы (см. PrivateChatOnlyMiddleware)
+    # тоже расходовал лимит отправителя, а не отвечал безлимитно в обход антифлуда.
     dispatcher.update.outer_middleware(
         ThrottlingMiddleware(
             interval=settings.throttle_interval,
@@ -71,6 +72,7 @@ def build_dispatcher(settings: Settings, session_factory) -> Dispatcher:
             default_language=settings.default_language,
         )
     )
+    dispatcher.update.outer_middleware(PrivateChatOnlyMiddleware(settings.default_language))
     dispatcher.update.outer_middleware(DatabaseMiddleware(session_factory))
     dispatcher.update.outer_middleware(UserContextMiddleware(settings))
 
@@ -85,9 +87,15 @@ async def run() -> None:
     if not settings.admin_ids:
         logger.warning("ADMIN_ID не задан — админ-панель будет недоступна")
 
-    engine = build_engine(settings.database_url, echo=settings.sql_echo)
-    session_factory = build_session_factory(engine)
-    await wait_for_database(engine)
+    try:
+        engine = build_engine(settings.database_url, echo=settings.sql_echo)
+        session_factory = build_session_factory(engine)
+        await wait_for_database(engine)
+    except Exception as exc:
+        # Не даём необработанному исключению всплыть в stderr как есть: сообщение об
+        # ошибке разбора DSN (например, от SQLAlchemy) может содержать пароль целиком.
+        logger.error("Не удалось подключиться к базе данных: %s", mask_secrets(str(exc)))
+        return
 
     session = None
     if settings.telegram_api_base:

@@ -237,6 +237,45 @@ async def test_concurrent_booking_creates_only_one_appointment(
         assert total == 1
 
 
+async def test_concurrent_booking_respects_active_appointment_limit(
+    session_factory, settings, fixtures
+):
+    """Гонка одного клиента за разные слоты: проходит не больше max_active_appointments.
+
+    Слоты и барбер общие, но не пересекаются — _lock_barber тут не сериализует
+    попытки, поэтому лимит обязан держаться на отдельном локе по клиенту.
+    """
+    barber_id, service_id, user_id = fixtures
+    hours = (10, 11, 12, 13, 14)
+    assert len(hours) > settings.max_active_appointments
+
+    async def attempt(hour: int) -> bool:
+        async with session_factory() as session:
+            user = await _load_user(session, user_id)
+            try:
+                await BookingService(session, settings).create_appointment(
+                    user=user,
+                    barber_id=barber_id,
+                    service_id=service_id,
+                    start=target_slot(settings, hour=hour),
+                )
+            except TooManyActiveAppointmentsError:
+                return False
+            return True
+
+    results = await asyncio.gather(*(attempt(hour) for hour in hours))
+    assert sum(results) == settings.max_active_appointments
+
+    async with session_factory() as session:
+        total = await session.scalar(
+            select(text("count(*)")).select_from(Appointment).where(
+                Appointment.user_id == user_id,
+                Appointment.status == AppointmentStatus.CONFIRMED,
+            )
+        )
+        assert total == settings.max_active_appointments
+
+
 async def test_cancel_frees_the_slot_and_drops_reminders(session_factory, settings, fixtures):
     barber_id, service_id, user_id = fixtures
     start = target_slot(settings, hour=15)
@@ -606,9 +645,9 @@ async def test_booking_keeps_query_count_bounded(
         )
 
     inserts = [q for q in query_counter if q.lstrip().upper().startswith("INSERT")]
-    # 9 запросов: услуга, барбер, лимит активных записей, advisory-lock,
-    # график, исключения, занятые слоты и два INSERT-а.
-    assert len(query_counter) <= 9, query_counter
+    # 10 запросов: услуга, барбер, лимит активных записей, advisory-lock клиента,
+    # advisory-lock барбера, график, исключения, занятые слоты и два INSERT-а.
+    assert len(query_counter) <= 10, query_counter
     # Оба напоминания создаются одним INSERT-ом вместе с записью.
     assert len(inserts) == 2, inserts
 
