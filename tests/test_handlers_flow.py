@@ -26,6 +26,8 @@ from app.database.models import (
     Appointment,
     AppointmentStatus,
     Barber,
+    BarberBranch,
+    Branch,
     Service,
     Tenant,
     User,
@@ -91,7 +93,11 @@ def dispatcher(settings, session_factory, tenant_id):
 
 @pytest.fixture
 async def shop(session_factory, tenant_id):
-    """Единственный активный барбер и единственная активная услуга (в своём арендаторе)."""
+    """Единственный активный филиал, барбер и услуга (в своём арендаторе).
+
+    Один активный филиал — render_branch_or_skip выбирает его молча, так что
+    сквозной сценарий записи остаётся прежним (без нового шага выбора филиала).
+    """
     marker = uuid.uuid4().hex[:6]
     async with session_factory() as session:
         hidden_services = list(
@@ -107,6 +113,7 @@ async def shop(session_factory, tenant_id):
         for item in (*hidden_services, *hidden_barbers):
             item.is_active = False
 
+        branch = Branch(tenant_id=tenant_id, name=f"Флоу-филиал {marker}")
         barber = Barber(tenant_id=tenant_id, name=f"Флоу-барбер {marker}")
         service = Service(
             tenant_id=tenant_id,
@@ -114,28 +121,32 @@ async def shop(session_factory, tenant_id):
             duration_minutes=60,
             price=Decimal("250.00"),
         )
-        session.add_all([barber, service])
+        session.add_all([branch, barber, service])
         await session.flush()
+        session.add(BarberBranch(tenant_id=tenant_id, barber_id=barber.id, branch_id=branch.id))
         for weekday in range(7):
             session.add(
                 WorkingSchedule(
                     tenant_id=tenant_id,
                     barber_id=barber.id,
+                    branch_id=branch.id,
                     weekday=weekday,
                     start_time=time(10, 0),
                     end_time=time(19, 0),
                 )
             )
         await session.commit()
-        ids = (barber.id, service.id)
+        ids = (barber.id, service.id, branch.id)
 
     yield ids
 
     async with session_factory() as session:
         await session.execute(delete(Appointment).where(Appointment.barber_id == ids[0]))
         await session.execute(delete(WorkingSchedule).where(WorkingSchedule.barber_id == ids[0]))
+        await session.execute(delete(BarberBranch).where(BarberBranch.barber_id == ids[0]))
         await session.execute(delete(Barber).where(Barber.id == ids[0]))
         await session.execute(delete(Service).where(Service.id == ids[1]))
+        await session.execute(delete(Branch).where(Branch.id == ids[2]))
         for item in (*hidden_services, *hidden_barbers):
             restored = await session.get(type(item), item.id)
             if restored is not None:
@@ -267,7 +278,7 @@ async def test_admin_cannot_be_faked_by_callback_data(dispatcher, mocked_bot, sh
 async def test_full_booking_flow_creates_appointment(
     dispatcher, mocked_bot, session_factory, shop, settings
 ):
-    barber_id, service_id = shop
+    barber_id, service_id, _ = shop
 
     await feed(dispatcher, mocked_bot, make_message("/start", CLIENT_ID))
     await feed(dispatcher, mocked_bot, make_callback("m:book", CLIENT_ID))
@@ -296,7 +307,7 @@ async def test_full_booking_flow_creates_appointment(
 async def test_double_tap_on_confirm_does_not_duplicate_appointment(
     dispatcher, mocked_bot, session_factory, shop
 ):
-    barber_id, _ = shop
+    barber_id, _, _ = shop
     await feed(dispatcher, mocked_bot, make_message("/start", CLIENT_ID))
     await feed(dispatcher, mocked_bot, make_callback("m:book", CLIENT_ID))
     await feed(dispatcher, mocked_bot, make_callback(button(mocked_bot, "sv:"), CLIENT_ID))
@@ -320,7 +331,7 @@ async def test_client_sees_only_own_appointments(
     dispatcher, mocked_bot, session_factory, shop
 ):
     """Чужая запись не появляется в «Мои записи» и не открывается по прямому id."""
-    barber_id, _ = shop
+    barber_id, _, _ = shop
     await feed(dispatcher, mocked_bot, make_message("/start", CLIENT_ID))
     await feed(dispatcher, mocked_bot, make_callback("m:book", CLIENT_ID))
     await feed(dispatcher, mocked_bot, make_callback(button(mocked_bot, "sv:"), CLIENT_ID))
@@ -396,7 +407,7 @@ async def test_client_can_switch_language_and_choice_persists(
 
 
 async def test_booking_flow_runs_in_english(dispatcher, mocked_bot, session_factory, shop):
-    barber_id, _ = shop
+    barber_id, _, _ = shop
     user_id = 990_103
 
     await feed(dispatcher, mocked_bot, make_message("/start", user_id, language="en"))
@@ -422,7 +433,7 @@ async def test_booking_flow_runs_in_english(dispatcher, mocked_bot, session_fact
 
 
 async def test_booking_flow_runs_in_romanian(dispatcher, mocked_bot, session_factory, shop):
-    barber_id, _ = shop
+    barber_id, _, _ = shop
     user_id = 990_105
 
     await feed(dispatcher, mocked_bot, make_message("/start", user_id, language="ro"))
@@ -448,7 +459,7 @@ async def test_booking_flow_runs_in_romanian(dispatcher, mocked_bot, session_fac
 
 async def test_domain_error_is_translated(dispatcher, mocked_bot, session_factory, shop, tenant_id):
     """Ошибка сервисного слоя приходит клиенту на его языке, а не по-русски."""
-    barber_id, service_id = shop
+    barber_id, service_id, branch_id = shop
     user_id = 990_104
     await feed(dispatcher, mocked_bot, make_message("/start", user_id, language="ro"))
 
@@ -461,6 +472,7 @@ async def test_domain_error_is_translated(dispatcher, mocked_bot, session_factor
             session.add(
                 Appointment(
                     tenant_id=tenant_id,
+                    branch_id=branch_id,
                     user_id=user.id,
                     barber_id=barber_id,
                     service_id=service_id,

@@ -19,6 +19,7 @@ from app.bot.keyboards.callbacks import (
     AdmCB,
     ApptCB,
     BarberCB,
+    BranchCB,
     ConfirmCB,
     DayCB,
     LangCB,
@@ -27,7 +28,7 @@ from app.bot.keyboards.callbacks import (
     ServiceCB,
     TimeCB,
 )
-from app.database.models import Appointment, Barber, Service
+from app.database.models import Appointment, Barber, Branch, Service
 from app.utils.dt import format_day_with_weekday, format_time, time_to_hhmm, to_local
 from app.utils.text import money
 
@@ -58,6 +59,15 @@ def languages_kb(lang: str, current: str) -> InlineKeyboardMarkup:
     for code, name in LANGUAGE_NAMES.items():
         mark = "✅ " if code == current else ""
         builder.button(text=f"{mark}{name}", callback_data=LangCB(code=code))
+    builder.button(text=t("btn.back_to_menu", lang), callback_data=NavCB(to="main"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def branches_kb(branches: Sequence[Branch], lang: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for branch in branches:
+        builder.button(text=f"📍 {branch.name}", callback_data=BranchCB(id=str(branch.id)))
     builder.button(text=t("btn.back_to_menu", lang), callback_data=NavCB(to="main"))
     builder.adjust(1)
     return builder.as_markup()

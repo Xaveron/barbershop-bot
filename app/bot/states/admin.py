@@ -15,6 +15,11 @@ class AdminBarberSG(StatesGroup):
     description = State()
 
 
+class AdminBranchSG(StatesGroup):
+    name = State()
+    address = State()
+
+
 class AdminScheduleSG(StatesGroup):
     hours = State()
 

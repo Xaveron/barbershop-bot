@@ -28,6 +28,7 @@ from app.database.models import (
 from app.database.repositories import (
     AppointmentRepository,
     BarberRepository,
+    BranchRepository,
     NotificationRepository,
     ServiceRepository,
 )
@@ -93,14 +94,19 @@ class BookingService:
         self.appointments = AppointmentRepository(session, tenant_id)
         self.services = ServiceRepository(session, tenant_id)
         self.barbers = BarberRepository(session, tenant_id)
+        self.branches = BranchRepository(session, tenant_id)
         self.notifications = NotificationRepository(session)
-        self.schedule = ScheduleService(session, settings, tenant_id)
+        # Не строим ScheduleService здесь: branch_id — параметр конкретного
+        # вызова (create_appointment получает выбранный клиентом филиал,
+        # reschedule_appointment — филиал уже существующей записи), а не
+        # что-то одно на весь BookingService, как tenant_id.
 
     # --- Создание -----------------------------------------------------------
     async def create_appointment(
         self,
         *,
         user: User,
+        branch_id: uuid.UUID,
         barber_id: uuid.UUID,
         service_id: uuid.UUID,
         start: datetime,
@@ -112,6 +118,8 @@ class BookingService:
         barber = await self.barbers.get_active(barber_id)
         if barber is None:
             raise BookingError("error.barber_unavailable")
+        if not await self.branches.barber_works_at_branch(barber_id=barber_id, branch_id=branch_id):
+            raise BookingError("error.barber_not_at_branch")
 
         now = now_utc()
         # Лочим клиента до чтения счётчика: иначе два параллельных запроса на
@@ -126,7 +134,8 @@ class BookingService:
         start_utc = to_utc(start)
         await self._lock_barber(barber_id)
 
-        free = await self.schedule.is_slot_available(
+        schedule = ScheduleService(self.session, self.settings, self.tenant_id, branch_id)
+        free = await schedule.is_slot_available(
             barber_id=barber_id,
             start=start_utc,
             duration_minutes=service.duration_minutes,
@@ -137,6 +146,7 @@ class BookingService:
 
         appointment = Appointment(
             tenant_id=self.tenant_id,
+            branch_id=branch_id,
             user_id=user.id,
             barber_id=barber.id,
             service_id=service.id,
@@ -236,7 +246,12 @@ class BookingService:
         new_start_utc = to_utc(new_start)
         await self._lock_barber(appointment.barber_id)
 
-        free = await self.schedule.is_slot_available(
+        # Перенос не меняет филиал записи — используем её собственный branch_id,
+        # а не выбор нового (переезд между филиалами — отдельная функция, не эта).
+        schedule = ScheduleService(
+            self.session, self.settings, self.tenant_id, appointment.branch_id
+        )
+        free = await schedule.is_slot_available(
             barber_id=appointment.barber_id,
             start=new_start_utc,
             duration_minutes=appointment.duration_minutes,

@@ -1,4 +1,4 @@
-"""Процесс записи: Услуга → Барбер → Дата → Время → (Телефон) → Подтверждение."""
+"""Процесс записи: (Филиал) → Услуга → Барбер → Дата → Время → (Телефон) → Подтверждение."""
 
 from __future__ import annotations
 
@@ -12,10 +12,20 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.i18n import t
-from app.bot.keyboards.callbacks import BarberCB, ConfirmCB, DayCB, MenuCB, NavCB, ServiceCB, TimeCB
+from app.bot.keyboards.callbacks import (
+    BarberCB,
+    BranchCB,
+    ConfirmCB,
+    DayCB,
+    MenuCB,
+    NavCB,
+    ServiceCB,
+    TimeCB,
+)
 from app.bot.keyboards.client import (
     back_to_main_kb,
     barbers_kb,
+    branches_kb,
     confirm_kb,
     days_kb,
     main_menu_kb,
@@ -27,8 +37,13 @@ from app.bot.keyboards.client import (
 from app.bot.states import BookingSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
-from app.database.models import Barber, Service, User
-from app.database.repositories import BarberRepository, ServiceRepository, UserRepository
+from app.database.models import Barber, Branch, Service, User
+from app.database.repositories import (
+    BarberRepository,
+    BranchRepository,
+    ServiceRepository,
+    UserRepository,
+)
 from app.services.booking import BookingError, BookingService
 from app.services.formatting import summary_block
 from app.services.notifications import NotificationService
@@ -42,6 +57,26 @@ router = Router(name="booking")
 
 
 # --- Рендер шагов -----------------------------------------------------------
+async def render_branch_or_skip(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    lang: str,
+) -> None:
+    """Если у арендатора один активный филиал (или ни одного) — выбираем его
+    молча, без клавиатуры: это сохраняет сегодняшний UX для всех, у кого пока
+    один филиал. Показываем выбор только когда филиалов реально несколько."""
+    branches = await BranchRepository(session, tenant_id).list_active()
+    if len(branches) <= 1:
+        if branches:
+            await state.update_data(branch_id=str(branches[0].id))
+        await render_services(callback, state, session, tenant_id, lang)
+        return
+    await state.set_state(BookingSG.branch)
+    await edit_message(callback, t("booking.step_branch", lang), branches_kb(branches, lang))
+
+
 async def render_services(
     callback: CallbackQuery,
     state: FSMContext,
@@ -62,9 +97,10 @@ async def render_barbers(
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    branch_id: uuid.UUID,
     lang: str,
 ) -> None:
-    barbers = await BarberRepository(session, tenant_id).list_active()
+    barbers = await BarberRepository(session, tenant_id).list_active_for_branch(branch_id)
     if not barbers:
         await edit_message(callback, t("booking.no_barbers", lang), back_to_main_kb(lang))
         return
@@ -80,12 +116,12 @@ async def render_days(
     tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
-    service, barber = await _load_selection(state, session, tenant_id)
-    if service is None or barber is None:
+    branch, service, barber = await _load_selection(state, session, tenant_id)
+    if branch is None or service is None or barber is None:
         await _restart(callback, state, session, tenant_id, lang)
         return
 
-    schedule = ScheduleService(session, settings, tenant_id)
+    schedule = ScheduleService(session, settings, tenant_id, branch.id)
     days = await schedule.available_days(
         barber_id=barber.id, duration_minutes=service.duration_minutes
     )
@@ -98,7 +134,9 @@ async def render_days(
                 barber=esc(barber.name),
                 days=settings.booking_horizon_days,
             ),
-            barbers_kb(await BarberRepository(session, tenant_id).list_active(), lang),
+            barbers_kb(
+                await BarberRepository(session, tenant_id).list_active_for_branch(branch.id), lang
+            ),
         )
         await state.set_state(BookingSG.barber)
         return
@@ -117,14 +155,14 @@ async def render_times(
     lang: str,
 ) -> None:
     data = await state.get_data()
-    service, barber = await _load_selection(state, session, tenant_id)
+    branch, service, barber = await _load_selection(state, session, tenant_id)
     day_raw = data.get("day")
-    if service is None or barber is None or not day_raw:
+    if branch is None or service is None or barber is None or not day_raw:
         await _restart(callback, state, session, tenant_id, lang)
         return
 
     day = date.fromisoformat(day_raw)
-    schedule = ScheduleService(session, settings, tenant_id)
+    schedule = ScheduleService(session, settings, tenant_id, branch.id)
     slots = await schedule.available_slots(
         barber_id=barber.id, day=day, duration_minutes=service.duration_minutes
     )
@@ -167,9 +205,15 @@ async def _show_summary_message(
     lang: str,
 ) -> None:
     """Карточка подтверждения отдельным сообщением (после шага с телефоном)."""
-    service, barber = await _load_selection(state, session, tenant_id)
+    branch, service, barber = await _load_selection(state, session, tenant_id)
     data = await state.get_data()
-    if service is None or barber is None or not data.get("day") or not data.get("time"):
+    if (
+        branch is None
+        or service is None
+        or barber is None
+        or not data.get("day")
+        or not data.get("time")
+    ):
         await state.clear()
         await message.answer(t("booking.session_expired", lang), reply_markup=remove_reply_kb())
         return
@@ -193,6 +237,28 @@ async def open_booking(
     lang: str,
 ) -> None:
     await state.clear()
+    await render_branch_or_skip(callback, state, session, tenant_id, lang)
+    await callback.answer()
+
+
+@router.callback_query(BookingSG.branch, BranchCB.filter())
+async def choose_branch(
+    callback: CallbackQuery,
+    callback_data: BranchCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    lang: str,
+) -> None:
+    branch_id = parse_uuid(callback_data.id)
+    branch = (
+        await BranchRepository(session, tenant_id).get_active(branch_id) if branch_id else None
+    )
+    if branch is None:
+        await alert(callback, t("booking.branch_gone", lang))
+        await render_branch_or_skip(callback, state, session, tenant_id, lang)
+        return
+    await state.update_data(branch_id=str(branch.id))
     await render_services(callback, state, session, tenant_id, lang)
     await callback.answer()
 
@@ -214,8 +280,16 @@ async def choose_service(
         await alert(callback, t("booking.service_gone", lang))
         await render_services(callback, state, session, tenant_id, lang)
         return
+    data = await state.get_data()
+    branch_id = parse_uuid(data.get("branch_id", ""))
+    branch = (
+        await BranchRepository(session, tenant_id).get_active(branch_id) if branch_id else None
+    )
+    if branch is None:
+        await _restart(callback, state, session, tenant_id, lang)
+        return
     await state.update_data(service_id=str(service.id))
-    await render_barbers(callback, state, session, tenant_id, lang)
+    await render_barbers(callback, state, session, tenant_id, branch.id, lang)
     await callback.answer()
 
 
@@ -234,8 +308,13 @@ async def choose_barber(
         await BarberRepository(session, tenant_id).get_active(barber_id) if barber_id else None
     )
     if barber is None:
+        data = await state.get_data()
+        branch_id = parse_uuid(data.get("branch_id", ""))
+        if branch_id is None:
+            await _restart(callback, state, session, tenant_id, lang)
+            return
         await alert(callback, t("booking.barber_gone", lang))
-        await render_barbers(callback, state, session, tenant_id, lang)
+        await render_barbers(callback, state, session, tenant_id, branch_id, lang)
         return
     await state.update_data(barber_id=str(barber.id))
     await render_days(callback, state, session, settings, tenant_id, lang)
@@ -273,9 +352,9 @@ async def choose_time(
     user: User,
     lang: str,
 ) -> None:
-    service, barber = await _load_selection(state, session, tenant_id)
+    branch, service, barber = await _load_selection(state, session, tenant_id)
     data = await state.get_data()
-    if service is None or barber is None or not data.get("day"):
+    if branch is None or service is None or barber is None or not data.get("day"):
         await _restart(callback, state, session, tenant_id, lang)
         return
     try:
@@ -287,7 +366,7 @@ async def choose_time(
     day = date.fromisoformat(data["day"])
     start_local = combine_local(day, chosen, settings.tz)
 
-    schedule = ScheduleService(session, settings, tenant_id)
+    schedule = ScheduleService(session, settings, tenant_id, branch.id)
     if not await schedule.is_slot_available(
         barber_id=barber.id, start=start_local, duration_minutes=service.duration_minutes
     ):
@@ -371,8 +450,10 @@ async def confirm_booking(
     lang: str,
 ) -> None:
     data = await state.get_data()
-    service, barber = await _load_selection(state, session, tenant_id)
-    if service is None or barber is None or not data.get("day") or not data.get("time"):
+    branch, service, barber = await _load_selection(state, session, tenant_id)
+    if branch is None or service is None or barber is None or not data.get("day") or not data.get(
+        "time"
+    ):
         await _restart(callback, state, session, tenant_id, lang)
         return
 
@@ -387,13 +468,16 @@ async def confirm_booking(
     try:
         appointment = await booking.create_appointment(
             user=user,
+            branch_id=branch.id,
             barber_id=barber.id,
             service_id=service.id,
             start=start_local,
         )
     except BookingError as exc:
         await state.set_state(BookingSG.day)
-        await state.update_data(service_id=str(service.id), barber_id=str(barber.id))
+        await state.update_data(
+            branch_id=str(branch.id), service_id=str(service.id), barber_id=str(barber.id)
+        )
         await alert(callback, t(exc.key, lang, **exc.params))
         await render_days(callback, state, session, settings, tenant_id, lang)
         return
@@ -445,7 +529,12 @@ async def nav_barber(
     tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
-    await render_barbers(callback, state, session, tenant_id, lang)
+    data = await state.get_data()
+    branch_id = parse_uuid(data.get("branch_id", ""))
+    if branch_id is None:
+        await _restart(callback, state, session, tenant_id, lang)
+        return
+    await render_barbers(callback, state, session, tenant_id, branch_id, lang)
     await callback.answer()
 
 
@@ -465,17 +554,21 @@ async def nav_day(
 # --- Вспомогательное --------------------------------------------------------
 async def _load_selection(
     state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
-) -> tuple[Service | None, Barber | None]:
+) -> tuple[Branch | None, Service | None, Barber | None]:
     data = await state.get_data()
+    branch_id = parse_uuid(data.get("branch_id", ""))
     service_id = parse_uuid(data.get("service_id", ""))
     barber_id = parse_uuid(data.get("barber_id", ""))
+    branch = (
+        await BranchRepository(session, tenant_id).get_active(branch_id) if branch_id else None
+    )
     service = (
         await ServiceRepository(session, tenant_id).get_active(service_id) if service_id else None
     )
     barber = (
         await BarberRepository(session, tenant_id).get_active(barber_id) if barber_id else None
     )
-    return service, barber
+    return branch, service, barber
 
 
 async def _restart(
@@ -487,4 +580,4 @@ async def _restart(
 ) -> None:
     await state.clear()
     await alert(callback, t("booking.session_expired", lang))
-    await render_services(callback, state, session, tenant_id, lang)
+    await render_branch_or_skip(callback, state, session, tenant_id, lang)

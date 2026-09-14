@@ -206,7 +206,7 @@ async def _render_reschedule_days(
         await alert(callback, t("appointments.not_found", lang))
         await state.clear()
         return
-    schedule = ScheduleService(session, settings, tenant_id)
+    schedule = ScheduleService(session, settings, tenant_id, appointment.branch_id)
     days = await schedule.available_days(
         barber_id=appointment.barber_id,
         duration_minutes=appointment.duration_minutes,
@@ -265,7 +265,7 @@ async def _render_reschedule_times(
         await state.clear()
         return
     day = date.fromisoformat(data["day"])
-    schedule = ScheduleService(session, settings, tenant_id)
+    schedule = ScheduleService(session, settings, tenant_id, appointment.branch_id)
     slots = await schedule.available_slots(
         barber_id=appointment.barber_id,
         day=day,

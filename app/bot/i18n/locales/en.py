@@ -55,6 +55,8 @@ MESSAGES: dict[str, str] = {
     "language.choose": "🌐 Choose your language:",
     "language.saved": "Done! Interface language: {language}",
     # --- Booking ------------------------------------------------------------
+    "booking.step_branch": "Choose a location:",
+    "booking.branch_gone": "This location is no longer available.",
     "booking.step_service": "Step 1 of 4 — choose a service:",
     "booking.step_barber": "Step 2 of 4 — choose a barber:",
     "booking.step_day": "Step 3 of 4 — choose a date:",
@@ -170,6 +172,9 @@ MESSAGES: dict[str, str] = {
     ),
     "error.service_unavailable": "This service is no longer available. Please pick another one.",
     "error.barber_unavailable": "This barber no longer takes bookings. Please pick another one.",
+    "error.barber_not_at_branch": (
+        "This barber doesn't work at this location. Please pick another one."
+    ),
     "error.slot_busy": "This time is already taken. Please pick another one.",
     "error.slot_race": "Someone took this slot a second earlier. Please pick another one.",
     "error.create_failed": "Could not create the booking. Please try again.",

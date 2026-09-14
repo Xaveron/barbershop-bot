@@ -13,6 +13,10 @@ class MenuCB(CallbackData, prefix="m"):
     action: str  # main | book | my | services | barbers | contacts | faq
 
 
+class BranchCB(CallbackData, prefix="bh"):
+    id: str
+
+
 class ServiceCB(CallbackData, prefix="sv"):
     id: str
 

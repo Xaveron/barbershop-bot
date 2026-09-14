@@ -25,6 +25,8 @@ from app.database.models import (
     Appointment,
     AppointmentStatus,
     Barber,
+    BarberBranch,
+    Branch,
     CancelledBy,
     Notification,
     NotificationKind,
@@ -38,6 +40,7 @@ from app.database.models import (
 from app.database.repositories import (
     AppointmentRepository,
     BarberRepository,
+    BranchRepository,
     NotificationRepository,
     ScheduleRepository,
     ServiceRepository,
@@ -116,9 +119,11 @@ async def tenant_id(session_factory):
 
 @pytest.fixture
 async def fixtures(session_factory, settings: Settings, tenant_id):
-    """Барбер (работает всю неделю 10:00–19:00), услуга 60 минут и клиент."""
+    """Филиал, барбер (работает всю неделю 10:00–19:00) в этом филиале,
+    услуга 60 минут и клиент."""
     marker = uuid.uuid4().hex[:8]
     async with session_factory() as session:
+        branch = Branch(tenant_id=tenant_id, name=f"Тест-филиал {marker}")
         barber = Barber(tenant_id=tenant_id, name=f"Тест-барбер {marker}")
         service = Service(
             tenant_id=tenant_id,
@@ -131,29 +136,35 @@ async def fixtures(session_factory, settings: Settings, tenant_id):
             telegram_id=900_000_000 + int(marker, 16) % 1_000_000,
             full_name="Тест Клиент",
         )
-        session.add_all([barber, service, user])
+        session.add_all([branch, barber, service, user])
         await session.flush()
+        session.add(BarberBranch(tenant_id=tenant_id, barber_id=barber.id, branch_id=branch.id))
         for weekday in range(7):
             session.add(
                 WorkingSchedule(
                     tenant_id=tenant_id,
                     barber_id=barber.id,
+                    branch_id=branch.id,
                     weekday=weekday,
                     start_time=time(10, 0),
                     end_time=time(19, 0),
                 )
             )
         await session.commit()
-        ids = (barber.id, service.id, user.id)
+        ids = (barber.id, service.id, user.id, branch.id)
 
     yield ids
 
     async with session_factory() as session:
         await session.execute(delete(Appointment).where(Appointment.barber_id == ids[0]))
         await session.execute(delete(WorkingSchedule).where(WorkingSchedule.barber_id == ids[0]))
+        await session.execute(
+            delete(BarberBranch).where(BarberBranch.barber_id == ids[0])
+        )
         await session.execute(delete(Barber).where(Barber.id == ids[0]))
         await session.execute(delete(Service).where(Service.id == ids[1]))
         await session.execute(delete(User).where(User.id == ids[2]))
+        await session.execute(delete(Branch).where(Branch.id == ids[3]))
         await session.commit()
 
 
@@ -167,13 +178,13 @@ async def _load_user(session, user_id: uuid.UUID) -> User:
 
 
 async def test_create_appointment_and_plan_reminders(session_factory, settings, tenant_id, fixtures):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings)
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         appointment = await BookingService(session, settings, tenant_id).create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=start
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
         assert appointment.status == AppointmentStatus.CONFIRMED
         assert appointment.ends_at - appointment.starts_at == timedelta(minutes=60)
@@ -188,13 +199,13 @@ async def test_create_appointment_and_plan_reminders(session_factory, settings, 
 
 
 async def test_double_booking_is_rejected_by_service(session_factory, settings, tenant_id, fixtures):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings)
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         await BookingService(session, settings, tenant_id).create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=start
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
 
     async with session_factory() as session:
@@ -202,6 +213,7 @@ async def test_double_booking_is_rejected_by_service(session_factory, settings, 
         with pytest.raises(SlotUnavailableError):
             await BookingService(session, settings, tenant_id).create_appointment(
                 user=user,
+                branch_id=branch_id,
                 barber_id=barber_id,
                 service_id=service_id,
                 start=start + timedelta(minutes=30),
@@ -212,19 +224,20 @@ async def test_overlap_is_rejected_by_database_constraint(
     session_factory, settings, tenant_id, fixtures
 ):
     """Даже прямой INSERT в обход сервиса не создаст пересечение."""
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings)
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         await BookingService(session, settings, tenant_id).create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=start
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
 
     async with session_factory() as session:
         session.add(
             Appointment(
                 tenant_id=tenant_id,
+                branch_id=branch_id,
                 user_id=user_id,
                 barber_id=barber_id,
                 service_id=service_id,
@@ -245,7 +258,7 @@ async def test_concurrent_booking_creates_only_one_appointment(
     session_factory, settings, tenant_id, fixtures
 ):
     """Гонка двух клиентов за один слот: побеждает ровно один."""
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, hour=14)
 
     async def attempt():
@@ -253,7 +266,7 @@ async def test_concurrent_booking_creates_only_one_appointment(
             user = await _load_user(session, user_id)
             try:
                 await BookingService(session, settings, tenant_id).create_appointment(
-                    user=user, barber_id=barber_id, service_id=service_id, start=start
+                    user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
                 )
             except SlotUnavailableError:
                 return False
@@ -280,7 +293,7 @@ async def test_concurrent_booking_respects_active_appointment_limit(
     Слоты и барбер общие, но не пересекаются — _lock_barber тут не сериализует
     попытки, поэтому лимит обязан держаться на отдельном локе по клиенту.
     """
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     hours = (10, 11, 12, 13, 14)
     assert len(hours) > settings.max_active_appointments
 
@@ -290,6 +303,7 @@ async def test_concurrent_booking_respects_active_appointment_limit(
             try:
                 await BookingService(session, settings, tenant_id).create_appointment(
                     user=user,
+                    branch_id=branch_id,
                     barber_id=barber_id,
                     service_id=service_id,
                     start=target_slot(settings, hour=hour),
@@ -319,6 +333,8 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
         session.add_all([tenant_a, tenant_b])
         await session.flush()
 
+        branch_a = Branch(tenant_id=tenant_a.id, name="Branch A")
+        branch_b = Branch(tenant_id=tenant_b.id, name="Branch B")
         barber_a = Barber(tenant_id=tenant_a.id, name="Barber A")
         service_a = Service(
             tenant_id=tenant_a.id, name="Cut", duration_minutes=60, price=Decimal("100")
@@ -331,14 +347,20 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
         )
         user_b = User(tenant_id=tenant_b.id, telegram_id=700_002, full_name="Client B")
 
-        session.add_all([barber_a, service_a, user_a, barber_b, service_b, user_b])
+        session.add_all(
+            [branch_a, branch_b, barber_a, service_a, user_a, barber_b, service_b, user_b]
+        )
         await session.flush()
-        for barber in (barber_a, barber_b):
+        for barber, branch in ((barber_a, branch_a), (barber_b, branch_b)):
+            session.add(
+                BarberBranch(tenant_id=barber.tenant_id, barber_id=barber.id, branch_id=branch.id)
+            )
             for weekday in range(7):
                 session.add(
                     WorkingSchedule(
                         tenant_id=barber.tenant_id,
                         barber_id=barber.id,
+                        branch_id=branch.id,
                         weekday=weekday,
                         start_time=time(10, 0),
                         end_time=time(19, 0),
@@ -351,9 +373,11 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
             barber_a.id,
             service_a.id,
             user_a.id,
+            branch_a.id,
             barber_b.id,
             service_b.id,
             user_b.id,
+            branch_b.id,
         )
 
     (
@@ -362,9 +386,11 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
         barber_a_id,
         service_a_id,
         user_a_id,
+        branch_a_id,
         barber_b_id,
         service_b_id,
         user_b_id,
+        branch_b_id,
     ) = ids
     start = target_slot(settings)
 
@@ -372,7 +398,11 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
         async with session_factory() as session:
             user_a_obj = await session.get(User, user_a_id)
             appt_a = await BookingService(session, settings, tenant_a_id).create_appointment(
-                user=user_a_obj, barber_id=barber_a_id, service_id=service_a_id, start=start
+                user=user_a_obj,
+                branch_id=branch_a_id,
+                barber_id=barber_a_id,
+                service_id=service_a_id,
+                start=start,
             )
 
         # (a) Сервисный слой: BookingService арендатора B не видит барбера/услугу
@@ -382,6 +412,7 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
             with pytest.raises(BookingError):
                 await BookingService(session, settings, tenant_b_id).create_appointment(
                     user=user_b_obj,
+                    branch_id=branch_a_id,
                     barber_id=barber_a_id,
                     service_id=service_a_id,
                     start=start,
@@ -394,6 +425,7 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
             assert await ServiceRepository(session, tenant_b_id).get(service_a_id) is None
             assert await AppointmentRepository(session, tenant_b_id).get(appt_a.id) is None
             assert await BarberRepository(session, tenant_a_id).get(barber_a_id) is not None
+            assert await BranchRepository(session, tenant_b_id).get(branch_a_id) is None
 
         # (c) Арендатор B может сам забронировать ТОТ ЖЕ слот на своём (так же
         # устроенном) барбере — EXCLUDE-констрейнт и проверка доступности слота
@@ -401,7 +433,11 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
         async with session_factory() as session:
             user_b_obj = await session.get(User, user_b_id)
             appt_b = await BookingService(session, settings, tenant_b_id).create_appointment(
-                user=user_b_obj, barber_id=barber_b_id, service_id=service_b_id, start=start
+                user=user_b_obj,
+                branch_id=branch_b_id,
+                barber_id=barber_b_id,
+                service_id=service_b_id,
+                start=start,
             )
             assert appt_b.status == AppointmentStatus.CONFIRMED
     finally:
@@ -411,6 +447,7 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
                 await session.execute(
                     delete(WorkingSchedule).where(WorkingSchedule.barber_id == bid)
                 )
+                await session.execute(delete(BarberBranch).where(BarberBranch.barber_id == bid))
             await session.execute(
                 delete(Barber).where(Barber.id.in_((barber_a_id, barber_b_id)))
             )
@@ -418,6 +455,9 @@ async def test_appointments_are_isolated_between_tenants(session_factory, settin
                 delete(Service).where(Service.id.in_((service_a_id, service_b_id)))
             )
             await session.execute(delete(User).where(User.id.in_((user_a_id, user_b_id))))
+            await session.execute(
+                delete(Branch).where(Branch.id.in_((branch_a_id, branch_b_id)))
+            )
             await session.execute(
                 delete(Tenant).where(Tenant.id.in_((tenant_a_id, tenant_b_id)))
             )
@@ -478,15 +518,21 @@ async def test_schedule_set_day_rejects_barber_from_another_tenant(session_facto
         tenant_b = Tenant(name="Tenant B", slug=f"b-{uuid.uuid4().hex[:8]}")
         session.add_all([tenant_a, tenant_b])
         await session.flush()
+        branch_a = Branch(tenant_id=tenant_a.id, name="Branch A")
         barber_b = Barber(tenant_id=tenant_b.id, name="Barber B")
-        session.add(barber_b)
+        session.add_all([branch_a, barber_b])
         await session.commit()
-        tenant_a_id, tenant_b_id, barber_b_id = tenant_a.id, tenant_b.id, barber_b.id
+        tenant_a_id, tenant_b_id, branch_a_id, barber_b_id = (
+            tenant_a.id,
+            tenant_b.id,
+            branch_a.id,
+            barber_b.id,
+        )
 
     try:
         async with session_factory() as session:
             record = await ScheduleRepository(session, tenant_a_id).set_day(
-                barber_b_id, 0, time(10, 0), time(19, 0)
+                barber_b_id, branch_a_id, 0, time(10, 0), time(19, 0)
             )
             assert record is None
 
@@ -499,6 +545,7 @@ async def test_schedule_set_day_rejects_barber_from_another_tenant(session_facto
         async with session_factory() as cleanup:
             await cleanup.execute(delete(WorkingSchedule).where(WorkingSchedule.barber_id == barber_b_id))
             await cleanup.execute(delete(Barber).where(Barber.id == barber_b_id))
+            await cleanup.execute(delete(Branch).where(Branch.id == branch_a_id))
             await cleanup.execute(delete(Tenant).where(Tenant.id.in_((tenant_a_id, tenant_b_id))))
             await cleanup.commit()
 
@@ -510,16 +557,25 @@ async def test_schedule_upsert_exception_rejects_barber_from_another_tenant(sess
         tenant_b = Tenant(name="Tenant B", slug=f"b-{uuid.uuid4().hex[:8]}")
         session.add_all([tenant_a, tenant_b])
         await session.flush()
+        branch_a = Branch(tenant_id=tenant_a.id, name="Branch A")
         barber_b = Barber(tenant_id=tenant_b.id, name="Barber B")
-        session.add(barber_b)
+        session.add_all([branch_a, barber_b])
         await session.commit()
-        tenant_a_id, tenant_b_id, barber_b_id = tenant_a.id, tenant_b.id, barber_b.id
+        tenant_a_id, tenant_b_id, branch_a_id, barber_b_id = (
+            tenant_a.id,
+            tenant_b.id,
+            branch_a.id,
+            barber_b.id,
+        )
 
     exception_date = (now_utc() + timedelta(days=5)).date()
     try:
         async with session_factory() as session:
             saved = await ScheduleRepository(session, tenant_a_id).upsert_exception(
-                barber_id=barber_b_id, exception_date=exception_date, is_day_off=True
+                branch_id=branch_a_id,
+                barber_id=barber_b_id,
+                exception_date=exception_date,
+                is_day_off=True,
             )
             assert saved is None
 
@@ -534,6 +590,7 @@ async def test_schedule_upsert_exception_rejects_barber_from_another_tenant(sess
                 delete(ScheduleException).where(ScheduleException.barber_id == barber_b_id)
             )
             await cleanup.execute(delete(Barber).where(Barber.id == barber_b_id))
+            await cleanup.execute(delete(Branch).where(Branch.id == branch_a_id))
             await cleanup.execute(delete(Tenant).where(Tenant.id.in_((tenant_a_id, tenant_b_id))))
             await cleanup.commit()
 
@@ -550,16 +607,18 @@ async def test_notification_list_due_is_scoped_to_tenant(session_factory, settin
         await session.flush()
 
         for label, tenant, tg_id in (("a", tenant_a, 800_101), ("b", tenant_b, 800_202)):
+            branch = Branch(tenant_id=tenant.id, name=f"Branch {label}")
             barber = Barber(tenant_id=tenant.id, name=f"Barber {label}")
             service = Service(
                 tenant_id=tenant.id, name=f"Cut {label}", duration_minutes=60, price=Decimal("100")
             )
             user = User(tenant_id=tenant.id, telegram_id=tg_id, full_name=f"Client {label}")
-            session.add_all([barber, service, user])
+            session.add_all([branch, barber, service, user])
             await session.flush()
             start = target_slot(settings, hour=12)
             appt = Appointment(
                 tenant_id=tenant.id,
+                branch_id=branch.id,
                 user_id=user.id,
                 barber_id=barber.id,
                 service_id=service.id,
@@ -581,7 +640,7 @@ async def test_notification_list_due_is_scoped_to_tenant(session_factory, settin
             )
             session.add(notif)
             await session.flush()
-            ids[label] = (tenant.id, barber.id, service.id, user.id, appt.id, notif.id)
+            ids[label] = (tenant.id, barber.id, service.id, user.id, appt.id, notif.id, branch.id)
         await session.commit()
 
     try:
@@ -594,13 +653,16 @@ async def test_notification_list_due_is_scoped_to_tenant(session_factory, settin
             assert ids["b"][5] not in due_ids
     finally:
         async with session_factory() as cleanup:
-            for _, _, _, _, appt_id, _ in ids.values():
+            for _, _, _, _, appt_id, _, _ in ids.values():
                 await cleanup.execute(delete(Notification).where(Notification.appointment_id == appt_id))
                 await cleanup.execute(delete(Appointment).where(Appointment.id == appt_id))
-            for _, barber_id_, service_id_, user_id_, _, _ in ids.values():
+            for _, barber_id_, service_id_, user_id_, _, _, _ in ids.values():
                 await cleanup.execute(delete(Barber).where(Barber.id == barber_id_))
                 await cleanup.execute(delete(Service).where(Service.id == service_id_))
                 await cleanup.execute(delete(User).where(User.id == user_id_))
+            await cleanup.execute(
+                delete(Branch).where(Branch.id.in_([v[6] for v in ids.values()]))
+            )
             await cleanup.execute(
                 delete(Tenant).where(Tenant.id.in_([v[0] for v in ids.values()]))
             )
@@ -610,14 +672,14 @@ async def test_notification_list_due_is_scoped_to_tenant(session_factory, settin
 async def test_cancel_frees_the_slot_and_drops_reminders(
     session_factory, settings, tenant_id, fixtures
 ):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, hour=15)
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         booking = BookingService(session, settings, tenant_id)
         appointment = await booking.create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=start
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
         cancelled = await booking.cancel_appointment(
             appointment_id=appointment.id,
@@ -637,13 +699,13 @@ async def test_cancel_frees_the_slot_and_drops_reminders(
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         again = await BookingService(session, settings, tenant_id).create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=start
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
         assert again.status == AppointmentStatus.CONFIRMED
 
 
 async def test_reschedule_moves_appointment(session_factory, settings, tenant_id, fixtures):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, hour=16)
     new_start = start + timedelta(hours=1)
 
@@ -651,7 +713,7 @@ async def test_reschedule_moves_appointment(session_factory, settings, tenant_id
         user = await _load_user(session, user_id)
         booking = BookingService(session, settings, tenant_id)
         appointment = await booking.create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=start
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
         moved = await booking.reschedule_appointment(
             appointment_id=appointment.id, new_start=new_start, actor_user_id=user.id
@@ -669,14 +731,14 @@ async def test_reschedule_moves_appointment(session_factory, settings, tenant_id
 async def test_appointment_outside_working_hours_is_rejected(
     session_factory, settings, tenant_id, fixtures
 ):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, hour=22)  # после 19:00
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         with pytest.raises(SlotUnavailableError):
             await BookingService(session, settings, tenant_id).create_appointment(
-                user=user, barber_id=barber_id, service_id=service_id, start=start
+                user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
             )
 
 
@@ -685,13 +747,13 @@ async def test_client_cannot_cancel_someone_elses_appointment(
     session_factory, settings, tenant_id, fixtures
 ):
     """IDOR: подставленный чужой UUID в callback не должен отменять запись."""
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, hour=11)
 
     async with session_factory() as session:
         owner = await _load_user(session, user_id)
         appointment = await BookingService(session, settings, tenant_id).create_appointment(
-            user=owner, barber_id=barber_id, service_id=service_id, start=start
+            user=owner, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
         stranger = User(tenant_id=tenant_id, telegram_id=910_000_001, full_name="Чужой Клиент")
         session.add(stranger)
@@ -718,13 +780,13 @@ async def test_client_cannot_cancel_someone_elses_appointment(
 async def test_client_cannot_reschedule_someone_elses_appointment(
     session_factory, settings, tenant_id, fixtures
 ):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, hour=12)
 
     async with session_factory() as session:
         owner = await _load_user(session, user_id)
         appointment = await BookingService(session, settings, tenant_id).create_appointment(
-            user=owner, barber_id=barber_id, service_id=service_id, start=start
+            user=owner, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
 
     async with session_factory() as session:
@@ -737,13 +799,13 @@ async def test_client_cannot_reschedule_someone_elses_appointment(
 
 
 async def test_admin_can_cancel_any_appointment(session_factory, settings, tenant_id, fixtures):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, hour=13)
 
     async with session_factory() as session:
         owner = await _load_user(session, user_id)
         appointment = await BookingService(session, settings, tenant_id).create_appointment(
-            user=owner, barber_id=barber_id, service_id=service_id, start=start
+            user=owner, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
         cancelled = await BookingService(session, settings, tenant_id).cancel_appointment(
             appointment_id=appointment.id,
@@ -758,7 +820,7 @@ async def test_hidden_service_cannot_be_booked_by_stale_callback(
     session_factory, settings, tenant_id, fixtures
 ):
     """Админ скрыл услугу, а у клиента осталось открытым старое меню."""
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     async with session_factory() as session:
         service = await session.get(Service, service_id)
         service.is_active = False
@@ -769,6 +831,7 @@ async def test_hidden_service_cannot_be_booked_by_stale_callback(
         with pytest.raises(BookingError):
             await BookingService(session, settings, tenant_id).create_appointment(
                 user=user,
+                branch_id=branch_id,
                 barber_id=barber_id,
                 service_id=service_id,
                 start=target_slot(settings, hour=11),
@@ -781,7 +844,7 @@ async def test_hidden_service_cannot_be_booked_by_stale_callback(
 
 
 async def test_hidden_barber_cannot_be_booked(session_factory, settings, tenant_id, fixtures):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     async with session_factory() as session:
         barber = await session.get(Barber, barber_id)
         barber.is_active = False
@@ -792,6 +855,7 @@ async def test_hidden_barber_cannot_be_booked(session_factory, settings, tenant_
         with pytest.raises(BookingError):
             await BookingService(session, settings, tenant_id).create_appointment(
                 user=user,
+                branch_id=branch_id,
                 barber_id=barber_id,
                 service_id=service_id,
                 start=target_slot(settings, hour=11),
@@ -804,12 +868,13 @@ async def test_hidden_barber_cannot_be_booked(session_factory, settings, tenant_
 
 
 async def test_booking_in_the_past_is_rejected(session_factory, settings, tenant_id, fixtures):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         with pytest.raises(SlotUnavailableError):
             await BookingService(session, settings, tenant_id).create_appointment(
                 user=user,
+                branch_id=branch_id,
                 barber_id=barber_id,
                 service_id=service_id,
                 start=target_slot(settings, days_ahead=-1, hour=12),
@@ -819,7 +884,7 @@ async def test_booking_in_the_past_is_rejected(session_factory, settings, tenant
 async def test_active_appointments_limit_is_enforced(
     session_factory, settings, tenant_id, fixtures
 ):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     hours = (10, 11, 12)
 
     async with session_factory() as session:
@@ -828,6 +893,7 @@ async def test_active_appointments_limit_is_enforced(
         for hour in hours:
             await booking.create_appointment(
                 user=user,
+                branch_id=branch_id,
                 barber_id=barber_id,
                 service_id=service_id,
                 start=target_slot(settings, hour=hour),
@@ -838,6 +904,7 @@ async def test_active_appointments_limit_is_enforced(
         with pytest.raises(TooManyActiveAppointmentsError):
             await BookingService(session, settings, tenant_id).create_appointment(
                 user=user,
+                branch_id=branch_id,
                 barber_id=barber_id,
                 service_id=service_id,
                 start=target_slot(settings, hour=14),
@@ -846,13 +913,14 @@ async def test_active_appointments_limit_is_enforced(
 
 async def test_cancellation_deadline_is_enforced(session_factory, settings, tenant_id, fixtures):
     """До визита меньше CANCEL_MIN_LEAD_MINUTES — клиент отменить уже не может."""
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     soon = now_utc() + timedelta(minutes=90)
 
     async with session_factory() as session:
         session.add(
             Appointment(
                 tenant_id=tenant_id,
+                branch_id=branch_id,
                 user_id=user_id,
                 barber_id=barber_id,
                 service_id=service_id,
@@ -888,14 +956,18 @@ async def test_cancellation_deadline_is_enforced(session_factory, settings, tena
 
 
 async def test_day_off_exception_blocks_booking(session_factory, settings, tenant_id, fixtures):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, days_ahead=3, hour=12)
     day = start.astimezone(settings.tz).date()
 
     async with session_factory() as session:
         session.add(
             ScheduleException(
-                tenant_id=tenant_id, barber_id=barber_id, exception_date=day, is_day_off=True
+                tenant_id=tenant_id,
+                branch_id=branch_id,
+                barber_id=barber_id,
+                exception_date=day,
+                is_day_off=True,
             )
         )
         await session.commit()
@@ -904,7 +976,7 @@ async def test_day_off_exception_blocks_booking(session_factory, settings, tenan
         user = await _load_user(session, user_id)
         with pytest.raises(SlotUnavailableError):
             await BookingService(session, settings, tenant_id).create_appointment(
-                user=user, barber_id=barber_id, service_id=service_id, start=start
+                user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
             )
 
     async with session_factory() as session:
@@ -918,16 +990,17 @@ async def test_day_off_exception_blocks_booking(session_factory, settings, tenan
 async def test_stats_summary_matches_underlying_data(
     session_factory, settings, tenant_id, fixtures
 ):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         booking = BookingService(session, settings, tenant_id)
         first = await booking.create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=target_slot(settings)
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=target_slot(settings)
         )
         await booking.create_appointment(
             user=user,
+            branch_id=branch_id,
             barber_id=barber_id,
             service_id=service_id,
             start=target_slot(settings, hour=15),
@@ -961,10 +1034,10 @@ async def test_available_days_does_not_query_per_day(
     session_factory, settings, tenant_id, fixtures, query_counter
 ):
     """Горизонт 14 дней должен грузиться одним пакетом, а не запросом на день."""
-    barber_id, _, _ = fixtures
+    barber_id, _, _, branch_id = fixtures
     async with session_factory() as session:
         query_counter.clear()
-        days = await ScheduleService(session, settings, tenant_id).available_days(
+        days = await ScheduleService(session, settings, tenant_id, branch_id).available_days(
             barber_id=barber_id, duration_minutes=60
         )
 
@@ -975,21 +1048,23 @@ async def test_available_days_does_not_query_per_day(
 async def test_booking_keeps_query_count_bounded(
     session_factory, settings, tenant_id, fixtures, query_counter
 ):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         query_counter.clear()
         await BookingService(session, settings, tenant_id).create_appointment(
             user=user,
+            branch_id=branch_id,
             barber_id=barber_id,
             service_id=service_id,
             start=target_slot(settings, hour=16),
         )
 
     inserts = [q for q in query_counter if q.lstrip().upper().startswith("INSERT")]
-    # 10 запросов: услуга, барбер, лимит активных записей, advisory-lock клиента,
-    # advisory-lock барбера, график, исключения, занятые слоты и два INSERT-а.
-    assert len(query_counter) <= 10, query_counter
+    # 11 запросов: услуга, барбер, барбер-в-филиале, лимит активных записей,
+    # advisory-lock клиента, advisory-lock барбера, график, исключения,
+    # занятые слоты и два INSERT-а.
+    assert len(query_counter) <= 11, query_counter
     # Оба напоминания создаются одним INSERT-ом вместе с записью.
     assert len(inserts) == 2, inserts
 
@@ -997,13 +1072,14 @@ async def test_booking_keeps_query_count_bounded(
 async def test_list_upcoming_loads_relations_without_n_plus_one(
     session_factory, settings, tenant_id, fixtures, query_counter
 ):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         booking = BookingService(session, settings, tenant_id)
         for hour in (10, 11):
             await booking.create_appointment(
                 user=user,
+                branch_id=branch_id,
                 barber_id=barber_id,
                 service_id=service_id,
                 start=target_slot(settings, hour=hour),
@@ -1026,7 +1102,7 @@ async def test_busy_barber_lock_fails_fast_with_friendly_error(
     session_factory, settings, tenant_id, fixtures
 ):
     """Если слот держит чужая транзакция, клиент не висит до statement_timeout."""
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     lock_key = _advisory_lock_key(barber_id)
 
     async with session_factory() as holder:
@@ -1040,6 +1116,7 @@ async def test_busy_barber_lock_fails_fast_with_friendly_error(
             with pytest.raises(BookingError) as error:
                 await BookingService(session, settings, tenant_id).create_appointment(
                     user=user,
+                    branch_id=branch_id,
                     barber_id=barber_id,
                     service_id=service_id,
                     start=target_slot(settings, hour=17),
@@ -1055,6 +1132,7 @@ async def test_busy_barber_lock_fails_fast_with_friendly_error(
         user = await _load_user(session, user_id)
         appointment = await BookingService(session, settings, tenant_id).create_appointment(
             user=user,
+            branch_id=branch_id,
             barber_id=barber_id,
             service_id=service_id,
             start=target_slot(settings, hour=17),
@@ -1064,27 +1142,27 @@ async def test_busy_barber_lock_fails_fast_with_friendly_error(
 
 async def test_booking_beyond_horizon_is_rejected(session_factory, settings, tenant_id, fixtures):
     """Подделанный callback с датой за горизонтом не должен создавать запись."""
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     beyond = target_slot(settings, days_ahead=settings.booking_horizon_days + 5, hour=12)
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         with pytest.raises(SlotUnavailableError):
             await BookingService(session, settings, tenant_id).create_appointment(
-                user=user, barber_id=barber_id, service_id=service_id, start=beyond
+                user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=beyond
             )
 
 
 async def test_last_day_of_horizon_is_still_bookable(
     session_factory, settings, tenant_id, fixtures
 ):
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     last_day = target_slot(settings, days_ahead=settings.booking_horizon_days - 1, hour=12)
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         appointment = await BookingService(session, settings, tenant_id).create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=last_day
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=last_day
         )
         assert appointment.status == AppointmentStatus.CONFIRMED
 
@@ -1093,13 +1171,13 @@ async def test_concurrent_dispatchers_do_not_send_reminder_twice(
     session_factory, settings, tenant_id, fixtures
 ):
     """Два экземпляра бота (или перезапуск) не должны продублировать напоминание."""
-    barber_id, service_id, user_id = fixtures
+    barber_id, service_id, user_id, branch_id = fixtures
     start = target_slot(settings, hour=12)
 
     async with session_factory() as session:
         user = await _load_user(session, user_id)
         appointment = await BookingService(session, settings, tenant_id).create_appointment(
-            user=user, barber_id=barber_id, service_id=service_id, start=start
+            user=user, branch_id=branch_id, barber_id=barber_id, service_id=service_id, start=start
         )
 
     async with session_factory() as session:

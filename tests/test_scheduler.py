@@ -20,6 +20,8 @@ from app.database.models import (
     Appointment,
     AppointmentStatus,
     Barber,
+    BarberBranch,
+    Branch,
     Notification,
     NotificationKind,
     NotificationStatus,
@@ -260,9 +262,10 @@ async def tenant_id(session_factory):
 
 @pytest.fixture
 async def db_shop(session_factory, tenant_id):
-    """Барбер + услуга + пользователь для интеграционных тестов."""
+    """Филиал + барбер + услуга + пользователь для интеграционных тестов."""
     marker = uuid.uuid4().hex[:6]
     async with session_factory() as session:
+        branch = Branch(tenant_id=tenant_id, name=f"Sched-{marker}")
         barber = Barber(tenant_id=tenant_id, name=f"Sched-{marker}")
         service = Service(
             tenant_id=tenant_id, name=f"Sched-{marker}", duration_minutes=60, price=Decimal("100")
@@ -273,16 +276,17 @@ async def db_shop(session_factory, tenant_id):
             full_name="Sched User",
             language_code="ru",
         )
-        session.add_all([barber, service, user])
+        session.add_all([branch, barber, service, user])
         await session.flush()
+        session.add(BarberBranch(tenant_id=tenant_id, barber_id=barber.id, branch_id=branch.id))
         session.add(WorkingSchedule(
             tenant_id=tenant_id,
-            barber_id=barber.id, weekday=0,
+            barber_id=barber.id, branch_id=branch.id, weekday=0,
             start_time=__import__("datetime").time(10, 0),
             end_time=__import__("datetime").time(19, 0),
         ))
         await session.commit()
-        ids = (barber.id, service.id, user.id)
+        ids = (barber.id, service.id, user.id, branch.id)
 
     yield ids
 
@@ -290,15 +294,17 @@ async def db_shop(session_factory, tenant_id):
     async with session_factory() as session:
         await session.execute(sa_delete(Appointment).where(Appointment.barber_id == ids[0]))
         await session.execute(sa_delete(WorkingSchedule).where(WorkingSchedule.barber_id == ids[0]))
+        await session.execute(sa_delete(BarberBranch).where(BarberBranch.barber_id == ids[0]))
         await session.execute(sa_delete(Barber).where(Barber.id == ids[0]))
         await session.execute(sa_delete(Service).where(Service.id == ids[1]))
         await session.execute(sa_delete(User).where(User.id == ids[2]))
+        await session.execute(sa_delete(Branch).where(Branch.id == ids[3]))
         await session.commit()
 
 
 @pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL не задан")
 async def test_complete_past_appointments_marks_ended(session_factory, db_shop, tenant_id):
-    barber_id, service_id, user_id = db_shop
+    barber_id, service_id, user_id, branch_id = db_shop
     now = now_utc()
     past_start = now - timedelta(hours=2)
     past_end = now - timedelta(hours=1)
@@ -307,14 +313,14 @@ async def test_complete_past_appointments_marks_ended(session_factory, db_shop, 
 
     async with session_factory() as session:
         past = Appointment(
-            tenant_id=tenant_id,
+            tenant_id=tenant_id, branch_id=branch_id,
             user_id=user_id, barber_id=barber_id, service_id=service_id,
             starts_at=past_start, ends_at=past_end,
             status=AppointmentStatus.CONFIRMED,
             price=Decimal("100"), duration_minutes=60,
         )
         future = Appointment(
-            tenant_id=tenant_id,
+            tenant_id=tenant_id, branch_id=branch_id,
             user_id=user_id, barber_id=barber_id, service_id=service_id,
             starts_at=future_start, ends_at=future_end,
             status=AppointmentStatus.CONFIRMED,
@@ -338,13 +344,13 @@ async def test_complete_past_appointments_marks_ended(session_factory, db_shop, 
 async def test_send_due_reminders_delivers_and_marks_sent(
     session_factory, db_shop, db_settings, tenant_id
 ):
-    barber_id, service_id, user_id = db_shop
+    barber_id, service_id, user_id, branch_id = db_shop
     now = now_utc()
     start = now + timedelta(hours=2)
 
     async with session_factory() as session:
         appt = Appointment(
-            tenant_id=tenant_id,
+            tenant_id=tenant_id, branch_id=branch_id,
             user_id=user_id, barber_id=barber_id, service_id=service_id,
             starts_at=start, ends_at=start + timedelta(hours=1),
             status=AppointmentStatus.CONFIRMED,

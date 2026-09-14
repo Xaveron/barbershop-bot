@@ -46,10 +46,19 @@ def _to_window(schedule: WorkingSchedule) -> WorkWindow:
 
 
 class ScheduleService:
-    def __init__(self, session: AsyncSession, settings: Settings, tenant_id: uuid.UUID) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        settings: Settings,
+        tenant_id: uuid.UUID,
+        branch_id: uuid.UUID,
+    ) -> None:
         self.session = session
         self.settings = settings
         self.tenant_id = tenant_id
+        self.branch_id = branch_id
+        # tz по-прежнему из Settings, не из Branch.timezone — см. docs/BRANCHES_DESIGN.md:
+        # разводка per-branch часового пояса на реальную UTC-арифметику отложена.
         self.tz = settings.tz
         self.schedules = ScheduleRepository(session, tenant_id)
         self.appointments = AppointmentRepository(session, tenant_id)
@@ -148,8 +157,8 @@ class ScheduleService:
         )
 
     async def week_summary(self, barber_id: uuid.UUID) -> dict[int, WorkWindow | None]:
-        """Недельный график барбера для админ-панели."""
-        records = await self.schedules.list_week(barber_id)
+        """Недельный график барбера в этом филиале для админ-панели."""
+        records = await self.schedules.list_week(barber_id, self.branch_id)
         summary: dict[int, WorkWindow | None] = dict.fromkeys(range(7))
         for record in records:
             summary[record.weekday] = _to_window(record)
@@ -184,12 +193,13 @@ class ScheduleService:
     ) -> ScheduleContext:
         weekly = {
             schedule.weekday: _to_window(schedule)
-            for schedule in await self.schedules.list_week(barber_id)
+            for schedule in await self.schedules.list_week(barber_id, self.branch_id)
         }
 
         barber_overrides: dict[date, DayOverride] = {}
         global_overrides: dict[date, DayOverride] = {}
         exceptions = await self.schedules.list_exceptions(
+            branch_id=self.branch_id,
             barber_id=barber_id,
             date_from=first_day,
             date_to=last_day,
@@ -201,6 +211,11 @@ class ScheduleService:
 
         period_start = combine_local(first_day, datetime.min.time(), self.tz)
         period_end = combine_local(last_day + timedelta(days=1), datetime.min.time(), self.tz)
+        # Занятость барбера НЕ фильтруется по филиалу: один и тот же человек не
+        # может быть в двух местах одновременно, поэтому запись в филиале А
+        # обязана блокировать слоты в филиале Б того же барбера (см.
+        # docs/BRANCHES_DESIGN.md — иначе открылась бы дыра для двойного
+        # бронирования между филиалами).
         appointments = await self.appointments.list_for_barber_between(
             barber_id=barber_id,
             start=period_start,

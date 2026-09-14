@@ -51,3 +51,29 @@ class AuthorizationService:
         if staff is None or not staff.is_active or staff.role != Role.BARBER:
             return False
         return staff.barber_id == barber_id
+
+    @staticmethod
+    def can_access_branch(
+        staff: StaffMember | None,
+        branch_id: uuid.UUID,
+        *,
+        accessible_branch_ids: frozenset[uuid.UUID],
+        is_super_admin: bool = False,
+    ) -> bool:
+        """4-я независимая проверка (см. docs/BRANCHES_DESIGN.md), отдельно
+        от tenant isolation / authorization / resource ownership: «может ли
+        сотрудник вообще трогать этот филиал». TENANT_OWNER/TENANT_ADMIN
+        видят все филиалы своего арендатора без единой строки staff_branches;
+        остальным ролям нужна явная запись.
+
+        accessible_branch_ids — уже прочитанный набор
+        (BranchRepository.accessible_branch_ids_for_staff), а не запрос
+        внутри этого метода: сервис остаётся чистой функцией без I/O, как и
+        его соседи, а поход в БД вызывающий код делает один раз за хендлер."""
+        if is_super_admin:
+            return True
+        if staff is None or not staff.is_active:
+            return False
+        if staff.role in (Role.TENANT_OWNER, Role.TENANT_ADMIN):
+            return True
+        return branch_id in accessible_branch_ids

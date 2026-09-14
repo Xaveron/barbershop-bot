@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy import func, select
+
+from app.database.models import Barber, BarberBranch, Branch, BranchService, Service, StaffBranch
+from app.database.repositories.base import TenantScopedRepository
+
+
+class BranchRepository(TenantScopedRepository):
+    async def get(self, branch_id: uuid.UUID) -> Branch | None:
+        # session.get() не умеет добавлять tenant_id в WHERE — обязателен select().
+        stmt = select(Branch).where(Branch.id == branch_id, Branch.tenant_id == self.tenant_id)
+        return await self.session.scalar(stmt)
+
+    async def get_active(self, branch_id: uuid.UUID) -> Branch | None:
+        branch = await self.get(branch_id)
+        return branch if branch is not None and branch.is_active else None
+
+    async def list_active(self) -> list[Branch]:
+        stmt = (
+            select(Branch)
+            .where(Branch.tenant_id == self.tenant_id, Branch.is_active.is_(True))
+            .order_by(Branch.name)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def list_all(self) -> list[Branch]:
+        stmt = (
+            select(Branch)
+            .where(Branch.tenant_id == self.tenant_id)
+            .order_by(Branch.is_active.desc(), Branch.name)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def create(
+        self, *, name: str, address: str | None = None, phone: str | None = None
+    ) -> Branch:
+        branch = Branch(tenant_id=self.tenant_id, name=name, address=address, phone=phone)
+        self.session.add(branch)
+        await self.session.flush()
+        return branch
+
+    async def _belongs_to_tenant(self, model, entity_id: uuid.UUID) -> bool:
+        stmt = select(func.count()).select_from(model).where(
+            model.id == entity_id, model.tenant_id == self.tenant_id
+        )
+        return bool(await self.session.scalar(stmt))
+
+    async def assign_barber(
+        self, *, barber_id: uuid.UUID, branch_id: uuid.UUID
+    ) -> BarberBranch | None:
+        """Возвращает None, если barber_id или branch_id принадлежат другому
+        арендатору — тот же паттерн, что ScheduleRepository._barber_belongs_to_tenant."""
+        if not await self._belongs_to_tenant(Barber, barber_id):
+            return None
+        if not await self._belongs_to_tenant(Branch, branch_id):
+            return None
+        existing = await self.session.scalar(
+            select(BarberBranch).where(
+                BarberBranch.tenant_id == self.tenant_id,
+                BarberBranch.barber_id == barber_id,
+                BarberBranch.branch_id == branch_id,
+            )
+        )
+        if existing is not None:
+            return existing
+        link = BarberBranch(tenant_id=self.tenant_id, barber_id=barber_id, branch_id=branch_id)
+        self.session.add(link)
+        await self.session.flush()
+        return link
+
+    async def assign_service(
+        self, *, service_id: uuid.UUID, branch_id: uuid.UUID, is_active: bool = True
+    ) -> BranchService | None:
+        """Тот же guard-паттерн, что assign_barber, но для доступности услуги в филиале."""
+        if not await self._belongs_to_tenant(Service, service_id):
+            return None
+        if not await self._belongs_to_tenant(Branch, branch_id):
+            return None
+        existing = await self.session.scalar(
+            select(BranchService).where(
+                BranchService.tenant_id == self.tenant_id,
+                BranchService.branch_id == branch_id,
+                BranchService.service_id == service_id,
+            )
+        )
+        if existing is not None:
+            existing.is_active = is_active
+            await self.session.flush()
+            return existing
+        link = BranchService(
+            tenant_id=self.tenant_id, branch_id=branch_id, service_id=service_id,
+            is_active=is_active,
+        )
+        self.session.add(link)
+        await self.session.flush()
+        return link
+
+    async def barber_works_at_branch(self, *, barber_id: uuid.UUID, branch_id: uuid.UUID) -> bool:
+        stmt = select(func.count()).select_from(BarberBranch).where(
+            BarberBranch.tenant_id == self.tenant_id,
+            BarberBranch.barber_id == barber_id,
+            BarberBranch.branch_id == branch_id,
+        )
+        return bool(await self.session.scalar(stmt))
+
+    async def service_available_at_branch(
+        self, *, service_id: uuid.UUID, branch_id: uuid.UUID
+    ) -> bool:
+        stmt = select(func.count()).select_from(BranchService).where(
+            BranchService.tenant_id == self.tenant_id,
+            BranchService.branch_id == branch_id,
+            BranchService.service_id == service_id,
+            BranchService.is_active.is_(True),
+        )
+        return bool(await self.session.scalar(stmt))
+
+    async def list_for_barber(self, barber_id: uuid.UUID) -> list[Branch]:
+        stmt = (
+            select(Branch)
+            .join(BarberBranch, BarberBranch.branch_id == Branch.id)
+            .where(
+                Branch.tenant_id == self.tenant_id,
+                BarberBranch.tenant_id == self.tenant_id,
+                BarberBranch.barber_id == barber_id,
+            )
+            .order_by(Branch.name)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def accessible_branch_ids_for_staff(
+        self, staff_member_id: uuid.UUID
+    ) -> frozenset[uuid.UUID]:
+        stmt = select(StaffBranch.branch_id).where(
+            StaffBranch.tenant_id == self.tenant_id,
+            StaffBranch.staff_member_id == staff_member_id,
+        )
+        return frozenset(await self.session.scalars(stmt))

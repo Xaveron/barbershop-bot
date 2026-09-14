@@ -30,6 +30,7 @@ class Role(enum.StrEnum):
 
 class Permission(enum.StrEnum):
     MANAGE_TENANT = "manage_tenant"
+    MANAGE_BRANCHES = "manage_branches"
     MANAGE_STAFF = "manage_staff"
     VIEW_STAFF = "view_staff"
     MANAGE_SERVICES = "manage_services"

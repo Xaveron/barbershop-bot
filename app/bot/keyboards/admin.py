@@ -9,7 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.bot.keyboards.callbacks import AdmCB, AdmDayCB, NavCB
-from app.database.models import Appointment, Barber, ScheduleException, Service
+from app.database.models import Appointment, Barber, Branch, ScheduleException, Service
 from app.utils.dt import WEEKDAYS_FULL, format_time, to_local
 from app.utils.text import money
 
@@ -18,7 +18,7 @@ def _back(action: str, arg: str = "") -> InlineKeyboardButton:
     return InlineKeyboardButton(text="⬅️ Назад", callback_data=AdmCB(action=action, arg=arg).pack())
 
 
-def admin_menu_kb() -> InlineKeyboardMarkup:
+def admin_menu_kb(*, can_manage_branches: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💇 Услуги", callback_data=AdmCB(action="services"))
     builder.button(text="👨‍💈 Барберы", callback_data=AdmCB(action="barbers"))
@@ -28,8 +28,38 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
     builder.button(text="👥 Клиенты", callback_data=AdmCB(action="clients", arg="0"))
     builder.button(text="📊 Статистика", callback_data=AdmCB(action="stats"))
     builder.button(text="📥 Экспорт CSV", callback_data=AdmCB(action="export"))
+    if can_manage_branches:
+        builder.button(text="📍 Филиалы", callback_data=AdmCB(action="branches"))
     builder.button(text="⬅️ В меню", callback_data=NavCB(to="main"))
-    builder.adjust(2, 2, 2, 2, 1)
+    builder.adjust(2, 2, 2, 2, 1, 1)
+    return builder.as_markup()
+
+
+def admin_branches_kb(branches: Sequence[Branch]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for branch in branches:
+        mark = "" if branch.is_active else "🚫 "
+        builder.button(
+            text=f"{mark}📍 {branch.name}",
+            callback_data=AdmCB(action="brh", arg=str(branch.id)),
+        )
+    builder.button(text="➕ Добавить филиал", callback_data=AdmCB(action="brh_add"))
+    builder.button(text="⬅️ Назад", callback_data=AdmCB(action="menu"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_branch_kb(branch: Branch) -> InlineKeyboardMarkup:
+    bid = str(branch.id)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Название", callback_data=AdmCB(action="brh_name", arg=bid))
+    builder.button(text="📝 Адрес", callback_data=AdmCB(action="brh_addr", arg=bid))
+    builder.button(
+        text="🚫 Скрыть" if branch.is_active else "✅ Показать",
+        callback_data=AdmCB(action="brh_toggle", arg=bid),
+    )
+    builder.button(text="⬅️ К филиалам", callback_data=AdmCB(action="branches"))
+    builder.adjust(2, 1, 1)
     return builder.as_markup()
 
 

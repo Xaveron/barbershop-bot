@@ -4,7 +4,7 @@ import uuid
 
 from sqlalchemy import func, select
 
-from app.database.models import Appointment, AppointmentStatus, Barber
+from app.database.models import Appointment, AppointmentStatus, Barber, BarberBranch
 from app.database.repositories.base import TenantScopedRepository
 
 
@@ -22,6 +22,20 @@ class BarberRepository(TenantScopedRepository):
         stmt = (
             select(Barber)
             .where(Barber.tenant_id == self.tenant_id, Barber.is_active.is_(True))
+            .order_by(Barber.sort_order, Barber.name)
+        )
+        return list(await self.session.scalars(stmt))
+
+    async def list_active_for_branch(self, branch_id: uuid.UUID) -> list[Barber]:
+        stmt = (
+            select(Barber)
+            .join(BarberBranch, BarberBranch.barber_id == Barber.id)
+            .where(
+                Barber.tenant_id == self.tenant_id,
+                Barber.is_active.is_(True),
+                BarberBranch.tenant_id == self.tenant_id,
+                BarberBranch.branch_id == branch_id,
+            )
             .order_by(Barber.sort_order, Barber.name)
         )
         return list(await self.session.scalars(stmt))

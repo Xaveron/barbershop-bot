@@ -55,6 +55,8 @@ MESSAGES: dict[str, str] = {
     "language.choose": "🌐 Alege limba:",
     "language.saved": "Gata! Limba interfeței: {language}",
     # --- Programare ---------------------------------------------------------
+    "booking.step_branch": "Alege locația:",
+    "booking.branch_gone": "Această locație nu mai este disponibilă.",
     "booking.step_service": "Pasul 1 din 4 — alege serviciul:",
     "booking.step_barber": "Pasul 2 din 4 — alege frizerul:",
     "booking.step_day": "Pasul 3 din 4 — alege data:",
@@ -175,6 +177,7 @@ MESSAGES: dict[str, str] = {
     ),
     "error.service_unavailable": "Serviciul nu mai este disponibil. Alege altul.",
     "error.barber_unavailable": "Frizerul nu mai primește programări. Alege altul.",
+    "error.barber_not_at_branch": "Frizerul nu lucrează la această locație. Alege altul.",
     "error.slot_busy": "Ora este deja ocupată. Te rugăm să alegi alta.",
     "error.slot_race": "Cineva a ocupat ora cu o secundă mai devreme. Alege alt interval.",
     "error.create_failed": "Nu am reușit să creez programarea. Încearcă din nou.",

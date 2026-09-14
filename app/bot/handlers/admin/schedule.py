@@ -25,8 +25,8 @@ from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import AdminExceptionSG, AdminScheduleSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
-from app.database.models import Permission
-from app.database.repositories import BarberRepository, ScheduleRepository
+from app.database.models import Branch, Permission
+from app.database.repositories import BarberRepository, BranchRepository, ScheduleRepository
 from app.services.schedule import ScheduleService
 from app.utils.dt import WEEKDAYS_FULL, format_time, today_in
 from app.utils.text import esc
@@ -73,7 +73,13 @@ async def show_week(
     if barber is None:
         await alert(callback, "Барбер не найден.")
         return
-    summary = await ScheduleService(session, settings, tenant_id).week_summary(barber.id)
+    branch = await _resolve_branch_for_barber(session, tenant_id, barber.id)
+    if branch is None:
+        await alert(callback, "Барбер не привязан ни к одному филиалу.")
+        return
+    summary = await ScheduleService(session, settings, tenant_id, branch.id).week_summary(
+        barber.id
+    )
     await edit_message(
         callback,
         f"🕐 <b>График: {esc(barber.name)}</b>\n\nВыберите день недели для изменения:",
@@ -96,7 +102,13 @@ async def show_weekday(
     if barber is None or not 0 <= callback_data.weekday <= 6:
         await alert(callback, "Барбер не найден.")
         return
-    record = await ScheduleRepository(session, tenant_id).get_day(barber.id, callback_data.weekday)
+    branch = await _resolve_branch_for_barber(session, tenant_id, barber.id)
+    if branch is None:
+        await alert(callback, "Барбер не привязан ни к одному филиалу.")
+        return
+    record = await ScheduleRepository(session, tenant_id).get_day(
+        barber.id, branch.id, callback_data.weekday
+    )
     current = (
         f"{format_time(record.start_time)}-{format_time(record.end_time)}"
         if record
@@ -151,9 +163,13 @@ async def save_hours(
         return
 
     await state.clear()
+    branch = await _resolve_branch_for_barber(session, tenant_id, barber_id)
+    if branch is None:
+        await message.answer("Барбер не привязан ни к одному филиалу.")
+        return
     try:
         record = await ScheduleRepository(session, tenant_id).set_day(
-            barber_id, weekday, start, end
+            barber_id, branch.id, weekday, start, end
         )
         if record is None:
             await session.rollback()
@@ -166,7 +182,9 @@ async def save_hours(
         await message.answer("⚠️ Не удалось сохранить график.")
         return
 
-    summary = await ScheduleService(session, settings, tenant_id).week_summary(barber_id)
+    summary = await ScheduleService(session, settings, tenant_id, branch.id).week_summary(
+        barber_id
+    )
     await message.answer(
         f"✅ {WEEKDAYS_FULL[weekday]}: {format_time(start)}-{format_time(end)}",
         reply_markup=week_kb(str(barber_id), summary),
@@ -186,9 +204,15 @@ async def set_day_off(
         await alert(callback, "Некорректные данные.")
         return
     barber_id, weekday = parsed
-    await ScheduleRepository(session, tenant_id).clear_day(barber_id, weekday)
+    branch = await _resolve_branch_for_barber(session, tenant_id, barber_id)
+    if branch is None:
+        await alert(callback, "Барбер не привязан ни к одному филиалу.")
+        return
+    await ScheduleRepository(session, tenant_id).clear_day(barber_id, branch.id, weekday)
     await session.commit()
-    summary = await ScheduleService(session, settings, tenant_id).week_summary(barber_id)
+    summary = await ScheduleService(session, settings, tenant_id, branch.id).week_summary(
+        barber_id
+    )
     await edit_message(
         callback,
         f"✅ {WEEKDAYS_FULL[weekday]} теперь выходной.",
@@ -208,19 +232,33 @@ async def show_exceptions(
 ) -> None:
     await state.clear()
     today = today_in(settings.tz)
-    exceptions = await ScheduleRepository(session, tenant_id).list_exceptions(
-        date_from=today, date_to=today + timedelta(days=EXCEPTIONS_HORIZON_DAYS)
-    )
+    branches = await BranchRepository(session, tenant_id).list_active()
+    exceptions: list = []
+    branch_names: dict[uuid.UUID, str] = {}
+    repository = ScheduleRepository(session, tenant_id)
+    for branch in branches:
+        branch_exceptions = await repository.list_exceptions(
+            branch_id=branch.id,
+            date_from=today,
+            date_to=today + timedelta(days=EXCEPTIONS_HORIZON_DAYS),
+        )
+        exceptions.extend(branch_exceptions)
+        branch_names.update({exc.id: branch.name for exc in branch_exceptions})
+    exceptions.sort(key=lambda exc: exc.exception_date)
+
     lines = ["🚫 <b>Исключения из графика</b>\n"]
     if not exceptions:
         lines.append("Пока нет запланированных исключений.")
     else:
         all_barbers = await BarberRepository(session, tenant_id).list_all()
         barbers = {barber.id: barber.name for barber in all_barbers}
+        multi_branch = len(branches) > 1
         for exception in exceptions:
-            scope = "весь барбершоп" if exception.is_global else barbers.get(
+            scope = "весь филиал" if exception.is_global else barbers.get(
                 exception.barber_id, "барбер"
             )
+            if multi_branch:
+                scope = f"{scope} ({branch_names.get(exception.id, '?')})"
             if exception.is_day_off:
                 detail = "выходной"
             else:
@@ -393,8 +431,17 @@ async def _save_exception(
     barber_id = None if scope == "all" else parse_uuid(scope)
     if scope != "all" and barber_id is None:
         return False
+
+    if barber_id is None:
+        branch = await _resolve_default_branch(session, tenant_id)
+    else:
+        branch = await _resolve_branch_for_barber(session, tenant_id, barber_id)
+    if branch is None:
+        return False
+
     try:
         saved = await ScheduleRepository(session, tenant_id).upsert_exception(
+            branch_id=branch.id,
             barber_id=barber_id,
             exception_date=date_type.fromisoformat(raw_date),
             is_day_off=is_day_off,
@@ -410,3 +457,23 @@ async def _save_exception(
         logger.exception("Не удалось сохранить исключение")
         return False
     return True
+
+
+# --- Резолв филиала по барберу/арендатору ------------------------------------
+async def _resolve_branch_for_barber(
+    session: AsyncSession, tenant_id: uuid.UUID, barber_id: uuid.UUID
+) -> Branch | None:
+    """Хендлеры графика работают с барбером, но график теперь принадлежит
+    филиалу. Сегодня (Phase 3) UI не даёт привязать барбера больше чем к
+    одному филиалу, так что берём первый — для реального многофилиального
+    сценария полноценный picker появится отдельным инкрементом."""
+    branches = await BranchRepository(session, tenant_id).list_for_barber(barber_id)
+    return branches[0] if branches else None
+
+
+async def _resolve_default_branch(session: AsyncSession, tenant_id: uuid.UUID) -> Branch | None:
+    """«Весь филиал» для исключений без привязки к барберу: однозначно только
+    когда у арендатора один активный филиал — как и everywhere else в Phase 3,
+    поведение для сегодняшних однофилиальных арендаторов не меняется."""
+    branches = await BranchRepository(session, tenant_id).list_active()
+    return branches[0] if len(branches) == 1 else None

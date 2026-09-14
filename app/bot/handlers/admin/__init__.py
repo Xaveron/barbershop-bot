@@ -5,6 +5,7 @@ from aiogram import Router
 from app.bot.handlers.admin import (
     appointments,
     barbers,
+    branches,
     editing,
     menu,
     reports,
@@ -25,6 +26,7 @@ def build_admin_router() -> Router:
     router.include_router(menu.router)
     router.include_router(services.router)
     router.include_router(barbers.router)
+    router.include_router(branches.router)
     router.include_router(schedule.router)
     router.include_router(appointments.router)
     router.include_router(reports.router)

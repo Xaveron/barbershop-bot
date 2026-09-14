@@ -58,8 +58,13 @@ class Appointment(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     (см. миграцию 0001): пересечение интервалов [starts_at, ends_at) для одного
     барбера невозможно, пока статус = 'confirmed'. Констрейнт создаётся сырым
     SQL, поэтому в metadata его нет — это осознанное решение ради совместимости.
-    Констрейнт ключуется по barber_id без tenant_id: barber_id — FK ровно на
-    одного арендатора, так что он уже однозначно разделяет арендаторов.
+    Констрейнт ключуется по barber_id без tenant_id/branch_id: barber_id — FK
+    ровно на одного арендатора и не может физически быть в двух местах
+    одновременно, так что он уже однозначно и достаточно разделяет и
+    арендаторов, и филиалы. branch_id на записи — информационный/для
+    фильтрации, НЕ часть защиты от двойного бронирования (см.
+    docs/BRANCHES_DESIGN.md) — иначе того же барбера можно было бы записать
+    одновременно в два филиала.
     """
 
     __tablename__ = "appointments"
@@ -71,11 +76,19 @@ class Appointment(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_appointments_user_id_starts_at", "user_id", "starts_at"),
         Index("ix_appointments_status_starts_at", "status", "starts_at"),
         Index("ix_appointments_tenant_id_starts_at", "tenant_id", "starts_at"),
+        Index(
+            "ix_appointments_tenant_id_branch_id_starts_at", "tenant_id", "branch_id", "starts_at"
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    branch_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("branches.id", ondelete="RESTRICT"),
         nullable=False,
     )
     barber_id: Mapped[uuid.UUID] = mapped_column(

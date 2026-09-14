@@ -27,11 +27,16 @@ if TYPE_CHECKING:
 
 
 class WorkingSchedule(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Регулярный недельный график барбера. Время локальное (TIMEZONE)."""
+    """Регулярный недельный график барбера в конкретном филиале. Время
+    локальное (TIMEZONE). Один барбер может иметь разные часы в разных
+    филиалах — поэтому branch_id часть уникальности, а не просто метаданные."""
 
     __tablename__ = "working_schedules"
     __table_args__ = (
-        UniqueConstraint("barber_id", "weekday", name="uq_working_schedules_barber_id_weekday"),
+        UniqueConstraint(
+            "barber_id", "branch_id", "weekday",
+            name="uq_working_schedules_barber_id_branch_id_weekday",
+        ),
         CheckConstraint("weekday >= 0 AND weekday <= 6", name="weekday_range"),
         CheckConstraint("end_time > start_time", name="valid_time_range"),
     )
@@ -39,6 +44,12 @@ class WorkingSchedule(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Ba
     barber_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("barbers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    branch_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("branches.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -50,10 +61,11 @@ class WorkingSchedule(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Ba
 
 
 class ScheduleException(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Исключение из графика на конкретную дату.
+    """Исключение из графика на конкретную дату, в конкретном филиале.
 
-    barber_id = NULL означает исключение для всего барбершопа одного
-    арендатора (например, государственный праздник).
+    barber_id = NULL означает исключение для всего ФИЛИАЛА (например,
+    государственный праздник в этом городе) — не для всего арендатора: у
+    разных филиалов одного арендатора может быть разный календарь закрытий.
     """
 
     __tablename__ = "schedule_exceptions"
@@ -67,22 +79,31 @@ class ScheduleException(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, 
         Index(
             "uq_schedule_exceptions_barber_date",
             "tenant_id",
+            "branch_id",
             "barber_id",
             "exception_date",
             unique=True,
             postgresql_where="barber_id IS NOT NULL",
         ),
-        # tenant_id здесь — не косметика: без него два арендатора не могли бы
-        # оба объявить общий выходной на одну и ту же дату.
+        # tenant_id + branch_id: без них два арендатора (или два филиала
+        # одного арендатора) не могли бы оба объявить общий выходной в одну
+        # и ту же дату.
         Index(
             "uq_schedule_exceptions_global_date",
             "tenant_id",
+            "branch_id",
             "exception_date",
             unique=True,
             postgresql_where="barber_id IS NULL",
         ),
     )
 
+    branch_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("branches.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     barber_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("barbers.id", ondelete="CASCADE"),

@@ -21,7 +21,7 @@ from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import AdminBarberSG, AdminFieldSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.database.models import Barber, Permission
-from app.database.repositories import BarberRepository, ScheduleRepository
+from app.database.repositories import BarberRepository, BranchRepository, ScheduleRepository
 from app.utils.dt import WEEKDAYS_SHORT, format_time
 from app.utils.text import esc
 from app.utils.validators import ValidationError, validate_description, validate_name
@@ -132,6 +132,15 @@ async def add_barber_description(
         barber = await BarberRepository(session, tenant_id).create(
             name=data["name"], description=description
         )
+        # Единственный активный филиал — привязываем автоматически, чтобы для
+        # сегодняшних (пока однофилиальных) арендаторов ничего не поменялось.
+        # Для арендатора с несколькими филиалами явную привязку барбера к
+        # нужным филиалам делает будущая фаза — сейчас такого UI нет.
+        branches = await BranchRepository(session, tenant_id).list_active()
+        if len(branches) == 1:
+            await BranchRepository(session, tenant_id).assign_barber(
+                barber_id=barber.id, branch_id=branches[0].id
+            )
         await session.commit()
     except Exception:
         await session.rollback()

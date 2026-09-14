@@ -4,8 +4,9 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class BookingSG(StatesGroup):
-    """Услуга → Барбер → Дата → Время → (Телефон) → Подтверждение."""
+    """(Филиал, если их >1) → Услуга → Барбер → Дата → Время → (Телефон) → Подтверждение."""
 
+    branch = State()
     service = State()
     barber = State()
     day = State()
