@@ -739,8 +739,9 @@ async def test_concurrent_dispatchers_do_not_send_reminder_twice(
     second = NotificationService(bot, session_factory, settings)
     results = await asyncio.gather(first.dispatch_due(), second.dispatch_due())
 
-    assert sum(results) == 1
+    assert sum(sent for sent, _ in results) == 1
     assert len(bot.sent) == 1
 
     # Третий проход уже ничего не находит: статус sent сохранён в БД.
-    assert await first.dispatch_due() == 0
+    sent, _ = await first.dispatch_due()
+    assert sent == 0
