@@ -14,6 +14,7 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
 from app.bot.handlers import build_router
@@ -48,8 +49,16 @@ async def setup_commands(bot: Bot, settings: Settings) -> None:
             )
 
 
+def _build_storage(settings: Settings) -> MemoryStorage | RedisStorage:
+    if settings.redis_url:
+        logger.info("FSM хранилище: Redis (%s)", settings.redis_url.split("@")[-1])
+        return RedisStorage.from_url(settings.redis_url)
+    logger.warning("REDIS_URL не задан — FSM в памяти (состояния теряются при перезапуске)")
+    return MemoryStorage()
+
+
 def build_dispatcher(settings: Settings, session_factory) -> Dispatcher:
-    dispatcher = Dispatcher(storage=MemoryStorage())
+    dispatcher = Dispatcher(storage=_build_storage(settings))
     dispatcher["settings"] = settings
     dispatcher["session_factory"] = session_factory
 
