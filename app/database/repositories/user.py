@@ -6,15 +6,21 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.database.models import Appointment, AppointmentStatus, User
-from app.database.repositories.base import BaseRepository
+from app.database.repositories.base import TenantScopedRepository
 
 
-class UserRepository(BaseRepository):
+class UserRepository(TenantScopedRepository):
     async def get(self, user_id: uuid.UUID) -> User | None:
-        return await self.session.get(User, user_id)
+        # session.get() не умеет добавлять tenant_id в WHERE — обязателен select().
+        stmt = select(User).where(User.id == user_id, User.tenant_id == self.tenant_id)
+        return await self.session.scalar(stmt)
 
     async def get_by_telegram_id(self, telegram_id: int) -> User | None:
-        stmt = select(User).where(User.telegram_id == telegram_id)
+        # tenant_id здесь не для подстраховки: telegram_id уникален только
+        # в пределах арендатора, а не глобально.
+        stmt = select(User).where(
+            User.telegram_id == telegram_id, User.tenant_id == self.tenant_id
+        )
         return await self.session.scalar(stmt)
 
     async def get_or_create(
@@ -33,6 +39,7 @@ class UserRepository(BaseRepository):
         user = await self.get_by_telegram_id(telegram_id)
         if user is None:
             user = User(
+                tenant_id=self.tenant_id,
                 telegram_id=telegram_id,
                 full_name=full_name,
                 username=username,
@@ -78,7 +85,8 @@ class UserRepository(BaseRepository):
             await self.session.flush()
 
     async def count(self) -> int:
-        return await self.session.scalar(select(func.count()).select_from(User)) or 0
+        stmt = select(func.count()).select_from(User).where(User.tenant_id == self.tenant_id)
+        return await self.session.scalar(stmt) or 0
 
     async def list_with_appointment_counts(
         self, *, limit: int = 10, offset: int = 0
@@ -89,8 +97,10 @@ class UserRepository(BaseRepository):
             .outerjoin(
                 Appointment,
                 (Appointment.user_id == User.id)
+                & (Appointment.tenant_id == self.tenant_id)
                 & (Appointment.status != AppointmentStatus.CANCELLED),
             )
+            .where(User.tenant_id == self.tenant_id)
             .group_by(User.id)
             .order_by(appointments_count.desc(), User.created_at.desc())
             .limit(limit)

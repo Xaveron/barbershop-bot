@@ -6,15 +6,18 @@ from datetime import date, time
 from sqlalchemy import or_, select
 
 from app.database.models import ScheduleException, WorkingSchedule
-from app.database.repositories.base import BaseRepository
+from app.database.repositories.base import TenantScopedRepository
 
 
-class ScheduleRepository(BaseRepository):
+class ScheduleRepository(TenantScopedRepository):
     # --- Недельный график ---------------------------------------------------
     async def list_week(self, barber_id: uuid.UUID) -> list[WorkingSchedule]:
         stmt = (
             select(WorkingSchedule)
-            .where(WorkingSchedule.barber_id == barber_id)
+            .where(
+                WorkingSchedule.barber_id == barber_id,
+                WorkingSchedule.tenant_id == self.tenant_id,
+            )
             .order_by(WorkingSchedule.weekday)
         )
         return list(await self.session.scalars(stmt))
@@ -23,6 +26,7 @@ class ScheduleRepository(BaseRepository):
         stmt = select(WorkingSchedule).where(
             WorkingSchedule.barber_id == barber_id,
             WorkingSchedule.weekday == weekday,
+            WorkingSchedule.tenant_id == self.tenant_id,
         )
         return await self.session.scalar(stmt)
 
@@ -32,7 +36,11 @@ class ScheduleRepository(BaseRepository):
         record = await self.get_day(barber_id, weekday)
         if record is None:
             record = WorkingSchedule(
-                barber_id=barber_id, weekday=weekday, start_time=start, end_time=end
+                tenant_id=self.tenant_id,
+                barber_id=barber_id,
+                weekday=weekday,
+                start_time=start,
+                end_time=end,
             )
             self.session.add(record)
         else:
@@ -51,7 +59,12 @@ class ScheduleRepository(BaseRepository):
 
     # --- Исключения ---------------------------------------------------------
     async def get_exception(self, exception_id: uuid.UUID) -> ScheduleException | None:
-        return await self.session.get(ScheduleException, exception_id)
+        # session.get() не умеет добавлять tenant_id в WHERE — обязателен select().
+        stmt = select(ScheduleException).where(
+            ScheduleException.id == exception_id,
+            ScheduleException.tenant_id == self.tenant_id,
+        )
+        return await self.session.scalar(stmt)
 
     async def list_exceptions(
         self,
@@ -61,7 +74,7 @@ class ScheduleRepository(BaseRepository):
         date_to: date | None = None,
         include_global: bool = True,
     ) -> list[ScheduleException]:
-        stmt = select(ScheduleException)
+        stmt = select(ScheduleException).where(ScheduleException.tenant_id == self.tenant_id)
         if barber_id is not None:
             condition = ScheduleException.barber_id == barber_id
             if include_global:
@@ -86,7 +99,9 @@ class ScheduleRepository(BaseRepository):
     ) -> ScheduleException:
         existing = await self._find_exception(barber_id, exception_date)
         if existing is None:
-            existing = ScheduleException(barber_id=barber_id, exception_date=exception_date)
+            existing = ScheduleException(
+                tenant_id=self.tenant_id, barber_id=barber_id, exception_date=exception_date
+            )
             self.session.add(existing)
         existing.is_day_off = is_day_off
         existing.start_time = None if is_day_off else start_time
@@ -102,7 +117,10 @@ class ScheduleRepository(BaseRepository):
     async def _find_exception(
         self, barber_id: uuid.UUID | None, exception_date: date
     ) -> ScheduleException | None:
-        stmt = select(ScheduleException).where(ScheduleException.exception_date == exception_date)
+        stmt = select(ScheduleException).where(
+            ScheduleException.exception_date == exception_date,
+            ScheduleException.tenant_id == self.tenant_id,
+        )
         stmt = stmt.where(
             ScheduleException.barber_id.is_(None)
             if barber_id is None

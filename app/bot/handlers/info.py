@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import time
 
 from aiogram import F, Router
@@ -24,8 +25,10 @@ router = Router(name="info")
 
 
 @router.callback_query(MenuCB.filter(F.action == "services"))
-async def show_services(callback: CallbackQuery, session: AsyncSession, lang: str) -> None:
-    services = await ServiceRepository(session).list_active()
+async def show_services(
+    callback: CallbackQuery, session: AsyncSession, tenant_id: uuid.UUID, lang: str
+) -> None:
+    services = await ServiceRepository(session, tenant_id).list_active()
     if not services:
         await edit_message(callback, t("info.services_empty", lang), back_to_main_kb(lang))
         await callback.answer()
@@ -45,8 +48,10 @@ async def show_services(callback: CallbackQuery, session: AsyncSession, lang: st
 
 
 @router.callback_query(MenuCB.filter(F.action == "barbers"))
-async def show_barbers(callback: CallbackQuery, session: AsyncSession, lang: str) -> None:
-    barbers = await BarberRepository(session).list_active()
+async def show_barbers(
+    callback: CallbackQuery, session: AsyncSession, tenant_id: uuid.UUID, lang: str
+) -> None:
+    barbers = await BarberRepository(session, tenant_id).list_active()
     if not barbers:
         await edit_message(callback, t("info.barbers_empty", lang), back_to_main_kb(lang))
         await callback.answer()
@@ -63,9 +68,13 @@ async def show_barbers(callback: CallbackQuery, session: AsyncSession, lang: str
 
 @router.callback_query(MenuCB.filter(F.action == "contacts"))
 async def show_contacts(
-    callback: CallbackQuery, session: AsyncSession, settings: Settings, lang: str
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
-    schedule_lines = await _shop_schedule_lines(session, lang)
+    schedule_lines = await _shop_schedule_lines(session, tenant_id, lang)
     await edit_message(
         callback,
         contacts_text(settings, schedule_lines, lang),
@@ -81,10 +90,10 @@ async def show_faq(callback: CallbackQuery, settings: Settings, lang: str) -> No
     await callback.answer()
 
 
-async def _shop_schedule_lines(session: AsyncSession, lang: str) -> list[str]:
+async def _shop_schedule_lines(session: AsyncSession, tenant_id: uuid.UUID, lang: str) -> list[str]:
     """График барбершопа = объединение графиков активных барберов."""
-    barbers = await BarberRepository(session).list_active()
-    schedules = ScheduleRepository(session)
+    barbers = await BarberRepository(session, tenant_id).list_active()
+    schedules = ScheduleRepository(session, tenant_id)
     merged: dict[int, tuple[time, time]] = {}
     for barber in barbers:
         for record in await schedules.list_week(barber.id):

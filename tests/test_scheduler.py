@@ -24,6 +24,7 @@ from app.database.models import (
     NotificationKind,
     NotificationStatus,
     Service,
+    Tenant,
     User,
     WorkingSchedule,
 )
@@ -49,6 +50,9 @@ def make_settings() -> Settings:
 
 
 # --- Unit-тесты NotificationService (без БД) --------------------------------
+# tenant_id здесь не влияет на поведение (репозитории замоканы) — нужен только
+# потому что конструктор сервиса требует его.
+_UNIT_TENANT_ID = uuid.uuid4()
 
 def _make_appointment_mock(
     *,
@@ -87,7 +91,7 @@ def _make_notification_mock(
 async def test_deliver_sends_message_and_marks_sent():
     bot = AsyncMock()
     settings = make_settings()
-    service = NotificationService(bot, AsyncMock(), settings)
+    service = NotificationService(bot, AsyncMock(), settings, _UNIT_TENANT_ID)
 
     appt = _make_appointment_mock(lang="ru")
     notif = _make_notification_mock(appt, NotificationKind.REMINDER_2H)
@@ -106,7 +110,7 @@ async def test_deliver_sends_message_and_marks_sent():
 
 async def test_deliver_skips_cancelled_appointment():
     bot = AsyncMock()
-    service = NotificationService(bot, AsyncMock(), make_settings())
+    service = NotificationService(bot, AsyncMock(), make_settings(), _UNIT_TENANT_ID)
 
     appt = _make_appointment_mock(status=AppointmentStatus.CANCELLED)
     notif = _make_notification_mock(appt)
@@ -121,7 +125,7 @@ async def test_deliver_skips_cancelled_appointment():
 
 async def test_deliver_skips_blocked_user():
     bot = AsyncMock()
-    service = NotificationService(bot, AsyncMock(), make_settings())
+    service = NotificationService(bot, AsyncMock(), make_settings(), _UNIT_TENANT_ID)
 
     appt = _make_appointment_mock(is_blocked=True)
     notif = _make_notification_mock(appt)
@@ -139,7 +143,7 @@ async def test_deliver_handles_bot_blocked_by_user():
     bot.send_message.side_effect = TelegramForbiddenError(
         method=MagicMock(), message="bot was blocked by the user"
     )
-    service = NotificationService(bot, AsyncMock(), make_settings())
+    service = NotificationService(bot, AsyncMock(), make_settings(), _UNIT_TENANT_ID)
 
     appt = _make_appointment_mock()
     notif = _make_notification_mock(appt)
@@ -158,7 +162,7 @@ async def test_deliver_handles_retry_after():
     bot.send_message.side_effect = TelegramRetryAfter(
         method=MagicMock(), message="Too Many Requests: retry after 5", retry_after=5
     )
-    service = NotificationService(bot, AsyncMock(), make_settings())
+    service = NotificationService(bot, AsyncMock(), make_settings(), _UNIT_TENANT_ID)
 
     appt = _make_appointment_mock()
     notif = _make_notification_mock(appt)
@@ -174,7 +178,7 @@ async def test_deliver_handles_retry_after():
 @pytest.mark.parametrize("lang", ["ru", "ro", "en"])
 async def test_reminder_text_uses_client_language(lang):
     bot = AsyncMock()
-    service = NotificationService(bot, AsyncMock(), make_settings())
+    service = NotificationService(bot, AsyncMock(), make_settings(), _UNIT_TENANT_ID)
 
     appt = _make_appointment_mock(lang=lang)
     notif = _make_notification_mock(appt, NotificationKind.REMINDER_24H)
@@ -189,7 +193,7 @@ async def test_reminder_text_uses_client_language(lang):
 async def test_notify_new_appointment_sends_to_admins():
     bot = AsyncMock()
     settings = make_settings()
-    service = NotificationService(bot, AsyncMock(), settings)
+    service = NotificationService(bot, AsyncMock(), settings, _UNIT_TENANT_ID)
 
     appt = _make_appointment_mock()
     appt.user.display_name = "Пётр"
@@ -206,7 +210,7 @@ async def test_notify_new_appointment_sends_to_admins():
 async def test_notify_cancelled_by_client_vs_admin():
     bot = AsyncMock()
     settings = make_settings()
-    service = NotificationService(bot, AsyncMock(), settings)
+    service = NotificationService(bot, AsyncMock(), settings, _UNIT_TENANT_ID)
 
     appt = _make_appointment_mock()
     appt.user.display_name = "Пётр"
@@ -236,17 +240,43 @@ def session_factory(db_settings):
     return build_session_factory(engine)
 
 
+@pytest.fixture(scope="module")
+async def tenant_id(session_factory):
+    """Отдельный арендатор на модуль — не пересекается с другими тестами/данными."""
+    marker = uuid.uuid4().hex[:8]
+    async with session_factory() as session:
+        tenant = Tenant(name=f"Sched Tenant {marker}", slug=f"sched-{marker}")
+        session.add(tenant)
+        await session.commit()
+        tid = tenant.id
+
+    yield tid
+
+    from sqlalchemy import delete as sa_delete
+    async with session_factory() as session:
+        await session.execute(sa_delete(Tenant).where(Tenant.id == tid))
+        await session.commit()
+
+
 @pytest.fixture
-async def db_shop(session_factory):
+async def db_shop(session_factory, tenant_id):
     """Барбер + услуга + пользователь для интеграционных тестов."""
     marker = uuid.uuid4().hex[:6]
     async with session_factory() as session:
-        barber = Barber(name=f"Sched-{marker}")
-        service = Service(name=f"Sched-{marker}", duration_minutes=60, price=Decimal("100"))
-        user = User(telegram_id=800_000 + int(marker[:4], 16) % 10000, full_name="Sched User", language_code="ru")
+        barber = Barber(tenant_id=tenant_id, name=f"Sched-{marker}")
+        service = Service(
+            tenant_id=tenant_id, name=f"Sched-{marker}", duration_minutes=60, price=Decimal("100")
+        )
+        user = User(
+            tenant_id=tenant_id,
+            telegram_id=800_000 + int(marker[:4], 16) % 10000,
+            full_name="Sched User",
+            language_code="ru",
+        )
         session.add_all([barber, service, user])
         await session.flush()
         session.add(WorkingSchedule(
+            tenant_id=tenant_id,
             barber_id=barber.id, weekday=0,
             start_time=__import__("datetime").time(10, 0),
             end_time=__import__("datetime").time(19, 0),
@@ -267,7 +297,7 @@ async def db_shop(session_factory):
 
 
 @pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL не задан")
-async def test_complete_past_appointments_marks_ended(session_factory, db_shop):
+async def test_complete_past_appointments_marks_ended(session_factory, db_shop, tenant_id):
     barber_id, service_id, user_id = db_shop
     now = now_utc()
     past_start = now - timedelta(hours=2)
@@ -277,12 +307,14 @@ async def test_complete_past_appointments_marks_ended(session_factory, db_shop):
 
     async with session_factory() as session:
         past = Appointment(
+            tenant_id=tenant_id,
             user_id=user_id, barber_id=barber_id, service_id=service_id,
             starts_at=past_start, ends_at=past_end,
             status=AppointmentStatus.CONFIRMED,
             price=Decimal("100"), duration_minutes=60,
         )
         future = Appointment(
+            tenant_id=tenant_id,
             user_id=user_id, barber_id=barber_id, service_id=service_id,
             starts_at=future_start, ends_at=future_end,
             status=AppointmentStatus.CONFIRMED,
@@ -292,7 +324,7 @@ async def test_complete_past_appointments_marks_ended(session_factory, db_shop):
         await session.commit()
         past_id, future_id = past.id, future.id
 
-    await complete_past_appointments(session_factory)
+    await complete_past_appointments(session_factory, tenant_id)
 
     async with session_factory() as session:
         refreshed_past = await session.get(Appointment, past_id)
@@ -303,13 +335,16 @@ async def test_complete_past_appointments_marks_ended(session_factory, db_shop):
 
 
 @pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL не задан")
-async def test_send_due_reminders_delivers_and_marks_sent(session_factory, db_shop, db_settings):
+async def test_send_due_reminders_delivers_and_marks_sent(
+    session_factory, db_shop, db_settings, tenant_id
+):
     barber_id, service_id, user_id = db_shop
     now = now_utc()
     start = now + timedelta(hours=2)
 
     async with session_factory() as session:
         appt = Appointment(
+            tenant_id=tenant_id,
             user_id=user_id, barber_id=barber_id, service_id=service_id,
             starts_at=start, ends_at=start + timedelta(hours=1),
             status=AppointmentStatus.CONFIRMED,
@@ -330,7 +365,7 @@ async def test_send_due_reminders_delivers_and_marks_sent(session_factory, db_sh
         notif_id = notif.id
 
     bot = AsyncMock()
-    await send_due_reminders(bot, session_factory, db_settings)
+    await send_due_reminders(bot, session_factory, db_settings, tenant_id)
 
     bot.send_message.assert_awaited_once()
 

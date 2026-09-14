@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -29,9 +30,9 @@ router = Router(name="admin-barbers")
 
 
 async def barber_card(
-    barber: Barber, session: AsyncSession
+    barber: Barber, session: AsyncSession, tenant_id: uuid.UUID
 ) -> tuple[str, InlineKeyboardMarkup]:
-    schedules = await ScheduleRepository(session).list_week(barber.id)
+    schedules = await ScheduleRepository(session, tenant_id).list_week(barber.id)
     if schedules:
         days = ", ".join(
             f"{WEEKDAYS_SHORT[item.weekday]} {format_time(item.start_time)}-"
@@ -49,8 +50,10 @@ async def barber_card(
     return text, admin_barber_kb(barber)
 
 
-async def barbers_list(session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
-    barbers = await BarberRepository(session).list_all()
+async def barbers_list(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[str, InlineKeyboardMarkup]:
+    barbers = await BarberRepository(session, tenant_id).list_all()
     if not barbers:
         return "👨‍💈 Барберов пока нет. Добавьте первого.", admin_barbers_kb(barbers)
     lines = ["👨‍💈 <b>Барберы</b>\n"]
@@ -60,23 +63,29 @@ async def barbers_list(session: AsyncSession) -> tuple[str, InlineKeyboardMarkup
 
 
 @router.callback_query(AdmCB.filter(F.action == "barbers"))
-async def show_barbers(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+async def show_barbers(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
     await state.clear()
-    text, markup = await barbers_list(session)
+    text, markup = await barbers_list(session, tenant_id)
     await edit_message(callback, text, markup)
     await callback.answer()
 
 
 @router.callback_query(AdmCB.filter(F.action == "brb"))
 async def show_barber(
-    callback: CallbackQuery, callback_data: AdmCB, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
-    barber = await _get_barber(callback_data.arg, session)
+    barber = await _get_barber(callback_data.arg, session, tenant_id)
     if barber is None:
         await alert(callback, "Барбер не найден.")
         return
-    text, markup = await barber_card(barber, session)
+    text, markup = await barber_card(barber, session, tenant_id)
     await edit_message(callback, text, markup)
     await callback.answer()
 
@@ -107,7 +116,7 @@ async def add_barber_name(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminBarberSG.description)
 async def add_barber_description(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     try:
         description = validate_description(message.text or "")
@@ -117,7 +126,7 @@ async def add_barber_description(
     data = await state.get_data()
     await state.clear()
     try:
-        barber = await BarberRepository(session).create(
+        barber = await BarberRepository(session, tenant_id).create(
             name=data["name"], description=description
         )
         await session.commit()
@@ -126,7 +135,7 @@ async def add_barber_description(
         logger.exception("Не удалось создать барбера")
         await message.answer("⚠️ Не удалось создать барбера.")
         return
-    text, markup = await barber_card(barber, session)
+    text, markup = await barber_card(barber, session, tenant_id)
     await message.answer(
         "✅ Барбер создан. Не забудьте задать график работы.\n\n" + text, reply_markup=markup
     )
@@ -140,9 +149,13 @@ _FIELD_PROMPTS = {
 
 @router.callback_query(AdmCB.filter(F.action.in_(set(_FIELD_PROMPTS))))
 async def edit_barber_field(
-    callback: CallbackQuery, callback_data: AdmCB, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
 ) -> None:
-    barber = await _get_barber(callback_data.arg, session)
+    barber = await _get_barber(callback_data.arg, session, tenant_id)
     if barber is None:
         await alert(callback, "Барбер не найден.")
         return
@@ -159,24 +172,24 @@ async def edit_barber_field(
 
 @router.callback_query(AdmCB.filter(F.action == "brb_toggle"))
 async def toggle_barber(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession
+    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    barber = await _get_barber(callback_data.arg, session)
+    barber = await _get_barber(callback_data.arg, session, tenant_id)
     if barber is None:
         await alert(callback, "Барбер не найден.")
         return
     barber.is_active = not barber.is_active
     await session.commit()
-    text, markup = await barber_card(barber, session)
+    text, markup = await barber_card(barber, session, tenant_id)
     await edit_message(callback, text, markup)
     await callback.answer("Статус обновлён")
 
 
 @router.callback_query(AdmCB.filter(F.action == "brb_del"))
 async def ask_delete_barber(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession
+    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    barber = await _get_barber(callback_data.arg, session)
+    barber = await _get_barber(callback_data.arg, session, tenant_id)
     if barber is None:
         await alert(callback, "Барбер не найден.")
         return
@@ -191,13 +204,13 @@ async def ask_delete_barber(
 
 @router.callback_query(AdmCB.filter(F.action == "brb_del_ok"))
 async def delete_barber(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession
+    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    barber = await _get_barber(callback_data.arg, session)
+    barber = await _get_barber(callback_data.arg, session, tenant_id)
     if barber is None:
         await alert(callback, "Барбер не найден.")
         return
-    repository = BarberRepository(session)
+    repository = BarberRepository(session, tenant_id)
     if await repository.has_appointments(barber.id):
         await alert(callback, "У барбера есть активные записи — можно только скрыть его.")
         return
@@ -209,13 +222,13 @@ async def delete_barber(
         logger.exception("Не удалось удалить барбера")
         await alert(callback, "Не удалось удалить: барбер используется в истории записей.")
         return
-    text, markup = await barbers_list(session)
+    text, markup = await barbers_list(session, tenant_id)
     await edit_message(callback, "🗑 Барбер удалён\n\n" + text, markup)
     await callback.answer("Удалено")
 
 
-async def _get_barber(raw_id: str, session: AsyncSession) -> Barber | None:
+async def _get_barber(raw_id: str, session: AsyncSession, tenant_id: uuid.UUID) -> Barber | None:
     barber_id = parse_uuid(raw_id)
     if barber_id is None:
         return None
-    return await BarberRepository(session).get(barber_id)
+    return await BarberRepository(session, tenant_id).get(barber_id)

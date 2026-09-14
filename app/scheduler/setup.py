@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC
 
 from aiogram import Bot
@@ -24,6 +25,7 @@ def build_scheduler(
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> AsyncIOScheduler:
     """Планировщик работает в UTC; локальное время используется только для отображения."""
     scheduler = AsyncIOScheduler(
@@ -36,21 +38,26 @@ def build_scheduler(
         trigger=IntervalTrigger(seconds=60),
         id="send_due_reminders",
         replace_existing=True,
-        kwargs={"bot": bot, "session_factory": session_factory, "settings": settings},
+        kwargs={
+            "bot": bot,
+            "session_factory": session_factory,
+            "settings": settings,
+            "tenant_id": tenant_id,
+        },
     )
     scheduler.add_job(
         complete_past_appointments,
         trigger=IntervalTrigger(minutes=30),
         id="complete_past_appointments",
         replace_existing=True,
-        kwargs={"session_factory": session_factory},
+        kwargs={"session_factory": session_factory, "tenant_id": tenant_id},
     )
     scheduler.add_job(
         schedule_return_reminders,
         trigger=IntervalTrigger(hours=6),
         id="schedule_return_reminders",
         replace_existing=True,
-        kwargs={"session_factory": session_factory, "settings": settings},
+        kwargs={"session_factory": session_factory, "settings": settings, "tenant_id": tenant_id},
     )
     logger.info("Планировщик сконфигурирован: %s задач", len(scheduler.get_jobs()))
     return scheduler

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 
 from aiogram import Bot
 from aiogram.exceptions import (
@@ -48,10 +49,12 @@ class NotificationService:
         bot: Bot,
         session_factory: async_sessionmaker[AsyncSession],
         settings: Settings,
+        tenant_id: uuid.UUID,
     ) -> None:
         self.bot = bot
         self.session_factory = session_factory
         self.settings = settings
+        self.tenant_id = tenant_id
         self.tz = settings.tz
 
     # --- Фоновая рассылка ---------------------------------------------------
@@ -64,7 +67,7 @@ class NotificationService:
         errors = 0
         async with self.session_factory() as session:
             repository = NotificationRepository(session)
-            users = UserRepository(session)
+            users = UserRepository(session, self.tenant_id)
             try:
                 due = await repository.list_due(now=now_utc(), limit=batch_size)
                 for notification in due:

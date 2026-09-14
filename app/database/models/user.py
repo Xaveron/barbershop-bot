@@ -2,21 +2,24 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, String, false
+from sqlalchemy import BigInteger, Boolean, String, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.database.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from app.database.models.appointment import Appointment
 
 
-class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class User(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Клиент барбершопа (пользователь Telegram)."""
 
     __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "telegram_id", name="uq_users_tenant_id_telegram_id"),
+    )
 
-    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     username: Mapped[str | None] = mapped_column(String(64))
     phone: Mapped[str | None] = mapped_column(String(32))

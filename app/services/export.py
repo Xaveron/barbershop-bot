@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import uuid
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,11 +33,11 @@ CSV_HEADERS = (
 
 
 class ExportService:
-    def __init__(self, session: AsyncSession, settings: Settings) -> None:
+    def __init__(self, session: AsyncSession, settings: Settings, tenant_id: uuid.UUID) -> None:
         self.session = session
         self.settings = settings
         self.tz = settings.tz
-        self.appointments = AppointmentRepository(session)
+        self.appointments = AppointmentRepository(session, tenant_id)
 
     async def appointments_csv(self, *, start: datetime, end: datetime) -> bytes:
         rows = await self.appointments.list_for_export(start=start, end=end)

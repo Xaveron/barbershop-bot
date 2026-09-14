@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date, datetime
 
 from aiogram import Bot, F, Router
@@ -42,9 +43,13 @@ router = Router(name="booking")
 
 # --- Рендер шагов -----------------------------------------------------------
 async def render_services(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, lang: str
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
-    services = await ServiceRepository(session).list_active()
+    services = await ServiceRepository(session, tenant_id).list_active()
     if not services:
         await edit_message(callback, t("booking.no_services", lang), back_to_main_kb(lang))
         return
@@ -53,9 +58,13 @@ async def render_services(
 
 
 async def render_barbers(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, lang: str
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
-    barbers = await BarberRepository(session).list_active()
+    barbers = await BarberRepository(session, tenant_id).list_active()
     if not barbers:
         await edit_message(callback, t("booking.no_barbers", lang), back_to_main_kb(lang))
         return
@@ -68,14 +77,15 @@ async def render_days(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
-    service, barber = await _load_selection(state, session)
+    service, barber = await _load_selection(state, session, tenant_id)
     if service is None or barber is None:
-        await _restart(callback, state, session, lang)
+        await _restart(callback, state, session, tenant_id, lang)
         return
 
-    schedule = ScheduleService(session, settings)
+    schedule = ScheduleService(session, settings, tenant_id)
     days = await schedule.available_days(
         barber_id=barber.id, duration_minutes=service.duration_minutes
     )
@@ -88,7 +98,7 @@ async def render_days(
                 barber=esc(barber.name),
                 days=settings.booking_horizon_days,
             ),
-            barbers_kb(await BarberRepository(session).list_active(), lang),
+            barbers_kb(await BarberRepository(session, tenant_id).list_active(), lang),
         )
         await state.set_state(BookingSG.barber)
         return
@@ -103,23 +113,24 @@ async def render_times(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
     data = await state.get_data()
-    service, barber = await _load_selection(state, session)
+    service, barber = await _load_selection(state, session, tenant_id)
     day_raw = data.get("day")
     if service is None or barber is None or not day_raw:
-        await _restart(callback, state, session, lang)
+        await _restart(callback, state, session, tenant_id, lang)
         return
 
     day = date.fromisoformat(day_raw)
-    schedule = ScheduleService(session, settings)
+    schedule = ScheduleService(session, settings, tenant_id)
     slots = await schedule.available_slots(
         barber_id=barber.id, day=day, duration_minutes=service.duration_minutes
     )
     if not slots:
         await alert(callback, t("booking.no_slots", lang))
-        await render_days(callback, state, session, settings, lang)
+        await render_days(callback, state, session, settings, tenant_id, lang)
         return
 
     await state.set_state(BookingSG.time)
@@ -148,10 +159,15 @@ def _summary_text(
 
 
 async def _show_summary_message(
-    message: Message, state: FSMContext, session: AsyncSession, settings: Settings, lang: str
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
     """Карточка подтверждения отдельным сообщением (после шага с телефоном)."""
-    service, barber = await _load_selection(state, session)
+    service, barber = await _load_selection(state, session, tenant_id)
     data = await state.get_data()
     if service is None or barber is None or not data.get("day") or not data.get("time"):
         await state.clear()
@@ -170,10 +186,14 @@ async def _show_summary_message(
 # --- Хендлеры ---------------------------------------------------------------
 @router.callback_query(MenuCB.filter(F.action == "book"))
 async def open_booking(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, lang: str
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
     await state.clear()
-    await render_services(callback, state, session, lang)
+    await render_services(callback, state, session, tenant_id, lang)
     await callback.answer()
 
 
@@ -183,16 +203,19 @@ async def choose_service(
     callback_data: ServiceCB,
     state: FSMContext,
     session: AsyncSession,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
     service_id = parse_uuid(callback_data.id)
-    service = await ServiceRepository(session).get_active(service_id) if service_id else None
+    service = (
+        await ServiceRepository(session, tenant_id).get_active(service_id) if service_id else None
+    )
     if service is None:
         await alert(callback, t("booking.service_gone", lang))
-        await render_services(callback, state, session, lang)
+        await render_services(callback, state, session, tenant_id, lang)
         return
     await state.update_data(service_id=str(service.id))
-    await render_barbers(callback, state, session, lang)
+    await render_barbers(callback, state, session, tenant_id, lang)
     await callback.answer()
 
 
@@ -203,16 +226,19 @@ async def choose_barber(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
     barber_id = parse_uuid(callback_data.id)
-    barber = await BarberRepository(session).get_active(barber_id) if barber_id else None
+    barber = (
+        await BarberRepository(session, tenant_id).get_active(barber_id) if barber_id else None
+    )
     if barber is None:
         await alert(callback, t("booking.barber_gone", lang))
-        await render_barbers(callback, state, session, lang)
+        await render_barbers(callback, state, session, tenant_id, lang)
         return
     await state.update_data(barber_id=str(barber.id))
-    await render_days(callback, state, session, settings, lang)
+    await render_days(callback, state, session, settings, tenant_id, lang)
     await callback.answer()
 
 
@@ -223,6 +249,7 @@ async def choose_day(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
     try:
@@ -231,7 +258,7 @@ async def choose_day(
         await alert(callback, t("booking.bad_date", lang))
         return
     await state.update_data(day=day.isoformat())
-    await render_times(callback, state, session, settings, lang)
+    await render_times(callback, state, session, settings, tenant_id, lang)
     await callback.answer()
 
 
@@ -242,13 +269,14 @@ async def choose_time(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     lang: str,
 ) -> None:
-    service, barber = await _load_selection(state, session)
+    service, barber = await _load_selection(state, session, tenant_id)
     data = await state.get_data()
     if service is None or barber is None or not data.get("day"):
-        await _restart(callback, state, session, lang)
+        await _restart(callback, state, session, tenant_id, lang)
         return
     try:
         chosen = hhmm_to_time(callback_data.value)
@@ -259,12 +287,12 @@ async def choose_time(
     day = date.fromisoformat(data["day"])
     start_local = combine_local(day, chosen, settings.tz)
 
-    schedule = ScheduleService(session, settings)
+    schedule = ScheduleService(session, settings, tenant_id)
     if not await schedule.is_slot_available(
         barber_id=barber.id, start=start_local, duration_minutes=service.duration_minutes
     ):
         await alert(callback, t("booking.slot_taken", lang))
-        await render_times(callback, state, session, settings, lang)
+        await render_times(callback, state, session, settings, tenant_id, lang)
         return
 
     await state.update_data(time=callback_data.value)
@@ -292,14 +320,15 @@ async def receive_contact(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     lang: str,
 ) -> None:
     if message.contact is not None:
-        await UserRepository(session).set_phone(user, message.contact.phone_number[:32])
+        await UserRepository(session, tenant_id).set_phone(user, message.contact.phone_number[:32])
         await session.commit()
     await message.answer(t("booking.phone_saved", lang), reply_markup=remove_reply_kb())
-    await _show_summary_message(message, state, session, settings, lang)
+    await _show_summary_message(message, state, session, settings, tenant_id, lang)
 
 
 @router.message(BookingSG.phone)
@@ -308,23 +337,24 @@ async def receive_phone_text(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     lang: str,
 ) -> None:
     raw = (message.text or "").strip()
     if raw == t("btn.skip", lang) or raw.lower() in {"skip", "пропустить", "omite"}:
         await message.answer(t("booking.phone_skipped", lang), reply_markup=remove_reply_kb())
-        await _show_summary_message(message, state, session, settings, lang)
+        await _show_summary_message(message, state, session, settings, tenant_id, lang)
         return
     try:
         phone = validate_phone(raw)
     except ValidationError:
         await message.answer(t("booking.phone_invalid", lang), reply_markup=phone_request_kb(lang))
         return
-    await UserRepository(session).set_phone(user, phone)
+    await UserRepository(session, tenant_id).set_phone(user, phone)
     await session.commit()
     await message.answer(t("booking.phone_saved", lang), reply_markup=remove_reply_kb())
-    await _show_summary_message(message, state, session, settings, lang)
+    await _show_summary_message(message, state, session, settings, tenant_id, lang)
 
 
 @router.callback_query(BookingSG.confirm, ConfirmCB.filter(F.action == "yes"))
@@ -333,6 +363,7 @@ async def confirm_booking(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
@@ -340,9 +371,9 @@ async def confirm_booking(
     lang: str,
 ) -> None:
     data = await state.get_data()
-    service, barber = await _load_selection(state, session)
+    service, barber = await _load_selection(state, session, tenant_id)
     if service is None or barber is None or not data.get("day") or not data.get("time"):
-        await _restart(callback, state, session, lang)
+        await _restart(callback, state, session, tenant_id, lang)
         return
 
     # Сразу сбрасываем состояние: повторное нажатие «Подтвердить»
@@ -352,7 +383,7 @@ async def confirm_booking(
     start_local = combine_local(
         date.fromisoformat(data["day"]), hhmm_to_time(data["time"]), settings.tz
     )
-    booking = BookingService(session, settings)
+    booking = BookingService(session, settings, tenant_id)
     try:
         appointment = await booking.create_appointment(
             user=user,
@@ -364,7 +395,7 @@ async def confirm_booking(
         await state.set_state(BookingSG.day)
         await state.update_data(service_id=str(service.id), barber_id=str(barber.id))
         await alert(callback, t(exc.key, lang, **exc.params))
-        await render_days(callback, state, session, settings, lang)
+        await render_days(callback, state, session, settings, tenant_id, lang)
         return
 
     summary = _summary_text(service, barber, start_local, lang)
@@ -380,7 +411,7 @@ async def confirm_booking(
     )
     await callback.answer(t("booking.done", lang))
 
-    notifier = NotificationService(bot, session_factory, settings)
+    notifier = NotificationService(bot, session_factory, settings, tenant_id)
     await notifier.notify_new_appointment(appointment)
 
 
@@ -396,17 +427,25 @@ async def decline_booking(
 # --- Навигация «назад» внутри процесса --------------------------------------
 @router.callback_query(NavCB.filter(F.to == "service"))
 async def nav_service(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, lang: str
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
-    await render_services(callback, state, session, lang)
+    await render_services(callback, state, session, tenant_id, lang)
     await callback.answer()
 
 
 @router.callback_query(NavCB.filter(F.to == "barber"))
 async def nav_barber(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, lang: str
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
-    await render_barbers(callback, state, session, lang)
+    await render_barbers(callback, state, session, tenant_id, lang)
     await callback.answer()
 
 
@@ -416,27 +455,36 @@ async def nav_day(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
-    await render_days(callback, state, session, settings, lang)
+    await render_days(callback, state, session, settings, tenant_id, lang)
     await callback.answer()
 
 
 # --- Вспомогательное --------------------------------------------------------
 async def _load_selection(
-    state: FSMContext, session: AsyncSession
+    state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
 ) -> tuple[Service | None, Barber | None]:
     data = await state.get_data()
     service_id = parse_uuid(data.get("service_id", ""))
     barber_id = parse_uuid(data.get("barber_id", ""))
-    service = await ServiceRepository(session).get_active(service_id) if service_id else None
-    barber = await BarberRepository(session).get_active(barber_id) if barber_id else None
+    service = (
+        await ServiceRepository(session, tenant_id).get_active(service_id) if service_id else None
+    )
+    barber = (
+        await BarberRepository(session, tenant_id).get_active(barber_id) if barber_id else None
+    )
     return service, barber
 
 
 async def _restart(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, lang: str
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
     await state.clear()
     await alert(callback, t("booking.session_expired", lang))
-    await render_services(callback, state, session, lang)
+    await render_services(callback, state, session, tenant_id, lang)

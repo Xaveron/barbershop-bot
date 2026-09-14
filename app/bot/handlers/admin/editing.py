@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from decimal import Decimal
 
 from aiogram import Router
@@ -29,7 +30,9 @@ router = Router(name="admin-editing")
 
 
 @router.message(AdminFieldSG.value)
-async def apply_field_edit(message: Message, state: FSMContext, session: AsyncSession) -> None:
+async def apply_field_edit(
+    message: Message, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
     data = await state.get_data()
     entity = data.get("entity")
     field = data.get("field")
@@ -48,7 +51,7 @@ async def apply_field_edit(message: Message, state: FSMContext, session: AsyncSe
         return
 
     if entity == "service":
-        service = await ServiceRepository(session).get(entity_id)
+        service = await ServiceRepository(session, tenant_id).get(entity_id)
         if service is None:
             await state.clear()
             await message.answer("Услуга не найдена.")
@@ -59,7 +62,7 @@ async def apply_field_edit(message: Message, state: FSMContext, session: AsyncSe
             return
         text, markup = service_card(service)
     else:
-        barber = await BarberRepository(session).get(entity_id)
+        barber = await BarberRepository(session, tenant_id).get(entity_id)
         if barber is None:
             await state.clear()
             await message.answer("Барбер не найден.")
@@ -68,7 +71,7 @@ async def apply_field_edit(message: Message, state: FSMContext, session: AsyncSe
         await state.clear()
         if not await _commit(session, message):
             return
-        text, markup = await barber_card(barber, session)
+        text, markup = await barber_card(barber, session, tenant_id)
 
     await message.answer("✅ Сохранено\n\n" + text, reply_markup=markup)
 

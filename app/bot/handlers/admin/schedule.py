@@ -39,10 +39,10 @@ EXCEPTIONS_HORIZON_DAYS = 180
 # --- Рабочие часы -----------------------------------------------------------
 @router.callback_query(AdmCB.filter(F.action == "schedule"))
 async def pick_barber_for_schedule(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     await state.clear()
-    barbers = await BarberRepository(session).list_all()
+    barbers = await BarberRepository(session, tenant_id).list_all()
     if not barbers:
         await alert(callback, "Сначала добавьте барбера.")
         return
@@ -61,14 +61,15 @@ async def show_week(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
     barber_id = parse_uuid(callback_data.arg)
-    barber = await BarberRepository(session).get(barber_id) if barber_id else None
+    barber = await BarberRepository(session, tenant_id).get(barber_id) if barber_id else None
     if barber is None:
         await alert(callback, "Барбер не найден.")
         return
-    summary = await ScheduleService(session, settings).week_summary(barber.id)
+    summary = await ScheduleService(session, settings, tenant_id).week_summary(barber.id)
     await edit_message(
         callback,
         f"🕐 <b>График: {esc(barber.name)}</b>\n\nВыберите день недели для изменения:",
@@ -79,15 +80,19 @@ async def show_week(
 
 @router.callback_query(AdmDayCB.filter())
 async def show_weekday(
-    callback: CallbackQuery, callback_data: AdmDayCB, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: AdmDayCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
     barber_id = parse_uuid(callback_data.barber)
-    barber = await BarberRepository(session).get(barber_id) if barber_id else None
+    barber = await BarberRepository(session, tenant_id).get(barber_id) if barber_id else None
     if barber is None or not 0 <= callback_data.weekday <= 6:
         await alert(callback, "Барбер не найден.")
         return
-    record = await ScheduleRepository(session).get_day(barber.id, callback_data.weekday)
+    record = await ScheduleRepository(session, tenant_id).get_day(barber.id, callback_data.weekday)
     current = (
         f"{format_time(record.start_time)}-{format_time(record.end_time)}"
         if record
@@ -122,7 +127,11 @@ async def ask_hours(callback: CallbackQuery, callback_data: AdmCB, state: FSMCon
 
 @router.message(AdminScheduleSG.hours)
 async def save_hours(
-    message: Message, state: FSMContext, session: AsyncSession, settings: Settings
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     try:
         start, end = validate_time_range(message.text or "")
@@ -139,7 +148,7 @@ async def save_hours(
 
     await state.clear()
     try:
-        await ScheduleRepository(session).set_day(barber_id, weekday, start, end)
+        await ScheduleRepository(session, tenant_id).set_day(barber_id, weekday, start, end)
         await session.commit()
     except Exception:
         await session.rollback()
@@ -147,7 +156,7 @@ async def save_hours(
         await message.answer("⚠️ Не удалось сохранить график.")
         return
 
-    summary = await ScheduleService(session, settings).week_summary(barber_id)
+    summary = await ScheduleService(session, settings, tenant_id).week_summary(barber_id)
     await message.answer(
         f"✅ {WEEKDAYS_FULL[weekday]}: {format_time(start)}-{format_time(end)}",
         reply_markup=week_kb(str(barber_id), summary),
@@ -156,16 +165,20 @@ async def save_hours(
 
 @router.callback_query(AdmCB.filter(F.action == "sch_off"))
 async def set_day_off(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, settings: Settings
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     parsed = _parse_barber_weekday(callback_data.arg)
     if parsed is None:
         await alert(callback, "Некорректные данные.")
         return
     barber_id, weekday = parsed
-    await ScheduleRepository(session).clear_day(barber_id, weekday)
+    await ScheduleRepository(session, tenant_id).clear_day(barber_id, weekday)
     await session.commit()
-    summary = await ScheduleService(session, settings).week_summary(barber_id)
+    summary = await ScheduleService(session, settings, tenant_id).week_summary(barber_id)
     await edit_message(
         callback,
         f"✅ {WEEKDAYS_FULL[weekday]} теперь выходной.",
@@ -177,18 +190,23 @@ async def set_day_off(
 # --- Исключения -------------------------------------------------------------
 @router.callback_query(AdmCB.filter(F.action == "exceptions"))
 async def show_exceptions(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
     today = today_in(settings.tz)
-    exceptions = await ScheduleRepository(session).list_exceptions(
+    exceptions = await ScheduleRepository(session, tenant_id).list_exceptions(
         date_from=today, date_to=today + timedelta(days=EXCEPTIONS_HORIZON_DAYS)
     )
     lines = ["🚫 <b>Исключения из графика</b>\n"]
     if not exceptions:
         lines.append("Пока нет запланированных исключений.")
     else:
-        barbers = {barber.id: barber.name for barber in await BarberRepository(session).list_all()}
+        all_barbers = await BarberRepository(session, tenant_id).list_all()
+        barbers = {barber.id: barber.name for barber in all_barbers}
         for exception in exceptions:
             scope = "весь барбершоп" if exception.is_global else barbers.get(
                 exception.barber_id, "барбер"
@@ -211,10 +229,10 @@ async def show_exceptions(
 
 @router.callback_query(AdmCB.filter(F.action == "exc_add"))
 async def add_exception_start(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     await state.clear()
-    barbers = await BarberRepository(session).list_all()
+    barbers = await BarberRepository(session, tenant_id).list_all()
     await edit_message(
         callback,
         "🚫 <b>Новое исключение</b>\n\nДля кого?",
@@ -268,7 +286,11 @@ async def add_exception_date(
 
 @router.callback_query(AdminExceptionSG.mode, AdmCB.filter(F.action == "exc_mode"))
 async def add_exception_mode(
-    callback: CallbackQuery, callback_data: AdmCB, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
 ) -> None:
     if callback_data.arg == "hours":
         await state.set_state(AdminExceptionSG.hours)
@@ -280,7 +302,7 @@ async def add_exception_mode(
         await callback.answer()
         return
 
-    saved = await _save_exception(state, session, is_day_off=True)
+    saved = await _save_exception(state, session, tenant_id, is_day_off=True)
     if not saved:
         await alert(callback, "Не удалось сохранить исключение.")
         return
@@ -291,14 +313,14 @@ async def add_exception_mode(
 
 @router.message(AdminExceptionSG.hours)
 async def add_exception_hours(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
     try:
         start, end = validate_time_range(message.text or "")
     except ValidationError as exc:
         await message.answer(f"⚠️ {esc(exc)}")
         return
-    saved = await _save_exception(state, session, is_day_off=False, start=start, end=end)
+    saved = await _save_exception(state, session, tenant_id, is_day_off=False, start=start, end=end)
     await state.clear()
     if not saved:
         await message.answer("⚠️ Не удалось сохранить исключение.")
@@ -311,11 +333,15 @@ async def add_exception_hours(
 
 @router.callback_query(AdmCB.filter(F.action == "exc_del"))
 async def delete_exception(
-    callback: CallbackQuery, callback_data: AdmCB, state: FSMContext, session: AsyncSession,
-    settings: Settings
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     exception_id = parse_uuid(callback_data.arg)
-    repository = ScheduleRepository(session)
+    repository = ScheduleRepository(session, tenant_id)
     exception = await repository.get_exception(exception_id) if exception_id else None
     if exception is None:
         await alert(callback, "Исключение не найдено.")
@@ -323,7 +349,7 @@ async def delete_exception(
     await repository.delete_exception(exception)
     await session.commit()
     await callback.answer("Удалено")
-    await show_exceptions(callback, state, session, settings)
+    await show_exceptions(callback, state, session, settings, tenant_id)
 
 
 # --- Вспомогательное --------------------------------------------------------
@@ -343,6 +369,7 @@ def _parse_barber_weekday(raw: str) -> tuple[uuid.UUID, int] | None:
 async def _save_exception(
     state: FSMContext,
     session: AsyncSession,
+    tenant_id: uuid.UUID,
     *,
     is_day_off: bool,
     start=None,
@@ -357,7 +384,7 @@ async def _save_exception(
     if scope != "all" and barber_id is None:
         return False
     try:
-        await ScheduleRepository(session).upsert_exception(
+        await ScheduleRepository(session, tenant_id).upsert_exception(
             barber_id=barber_id,
             exception_date=date_type.fromisoformat(raw_date),
             is_day_off=is_day_off,

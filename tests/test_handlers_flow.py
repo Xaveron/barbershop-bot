@@ -27,6 +27,7 @@ from app.database.models import (
     AppointmentStatus,
     Barber,
     Service,
+    Tenant,
     User,
     WorkingSchedule,
 )
@@ -66,30 +67,59 @@ def session_factory(settings: Settings):
 
 
 @pytest.fixture(scope="module")
-def dispatcher(settings, session_factory):
+async def tenant_id(session_factory):
+    """Отдельный арендатор на модуль — не пересекается с другими тестами/данными."""
+    marker = uuid.uuid4().hex[:8]
+    async with session_factory() as session:
+        tenant = Tenant(name=f"Flow Tenant {marker}", slug=f"flow-{marker}")
+        session.add(tenant)
+        await session.commit()
+        tid = tenant.id
+
+    yield tid
+
+    async with session_factory() as session:
+        await session.execute(delete(Tenant).where(Tenant.id == tid))
+        await session.commit()
+
+
+@pytest.fixture(scope="module")
+def dispatcher(settings, session_factory, tenant_id):
     """Хендлер-роутеры aiogram — модульные синглтоны: Dispatcher создаём один раз."""
-    return build_dispatcher(settings, session_factory)
+    return build_dispatcher(settings, session_factory, tenant_id)
 
 
 @pytest.fixture
-async def shop(session_factory):
-    """Единственный активный барбер и единственная активная услуга."""
+async def shop(session_factory, tenant_id):
+    """Единственный активный барбер и единственная активная услуга (в своём арендаторе)."""
     marker = uuid.uuid4().hex[:6]
     async with session_factory() as session:
-        hidden_services = list(await session.scalars(select(Service).where(Service.is_active)))
-        hidden_barbers = list(await session.scalars(select(Barber).where(Barber.is_active)))
+        hidden_services = list(
+            await session.scalars(
+                select(Service).where(Service.tenant_id == tenant_id, Service.is_active)
+            )
+        )
+        hidden_barbers = list(
+            await session.scalars(
+                select(Barber).where(Barber.tenant_id == tenant_id, Barber.is_active)
+            )
+        )
         for item in (*hidden_services, *hidden_barbers):
             item.is_active = False
 
-        barber = Barber(name=f"Флоу-барбер {marker}")
+        barber = Barber(tenant_id=tenant_id, name=f"Флоу-барбер {marker}")
         service = Service(
-            name=f"Флоу-услуга {marker}", duration_minutes=60, price=Decimal("250.00")
+            tenant_id=tenant_id,
+            name=f"Флоу-услуга {marker}",
+            duration_minutes=60,
+            price=Decimal("250.00"),
         )
         session.add_all([barber, service])
         await session.flush()
         for weekday in range(7):
             session.add(
                 WorkingSchedule(
+                    tenant_id=tenant_id,
                     barber_id=barber.id,
                     weekday=weekday,
                     start_time=time(10, 0),
@@ -416,7 +446,7 @@ async def test_booking_flow_runs_in_romanian(dispatcher, mocked_bot, session_fac
     assert appointment.status == AppointmentStatus.CONFIRMED
 
 
-async def test_domain_error_is_translated(dispatcher, mocked_bot, session_factory, shop):
+async def test_domain_error_is_translated(dispatcher, mocked_bot, session_factory, shop, tenant_id):
     """Ошибка сервисного слоя приходит клиенту на его языке, а не по-русски."""
     barber_id, service_id = shop
     user_id = 990_104
@@ -430,6 +460,7 @@ async def test_domain_error_is_translated(dispatcher, mocked_bot, session_factor
             start_at = base + timedelta(hours=index * 2)
             session.add(
                 Appointment(
+                    tenant_id=tenant_id,
                     user_id=user.id,
                     barber_id=barber_id,
                     service_id=service_id,

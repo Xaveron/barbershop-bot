@@ -20,13 +20,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.database.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from app.database.models.barber import Barber
 
 
-class WorkingSchedule(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class WorkingSchedule(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Регулярный недельный график барбера. Время локальное (TIMEZONE)."""
 
     __tablename__ = "working_schedules"
@@ -49,11 +49,11 @@ class WorkingSchedule(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     barber: Mapped[Barber] = relationship(back_populates="working_schedules")
 
 
-class ScheduleException(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class ScheduleException(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Исключение из графика на конкретную дату.
 
-    barber_id = NULL означает исключение для всего барбершопа
-    (например, государственный праздник).
+    barber_id = NULL означает исключение для всего барбершопа одного
+    арендатора (например, государственный праздник).
     """
 
     __tablename__ = "schedule_exceptions"
@@ -66,13 +66,17 @@ class ScheduleException(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         Index(
             "uq_schedule_exceptions_barber_date",
+            "tenant_id",
             "barber_id",
             "exception_date",
             unique=True,
             postgresql_where="barber_id IS NOT NULL",
         ),
+        # tenant_id здесь — не косметика: без него два арендатора не могли бы
+        # оба объявить общий выходной на одну и ту же дату.
         Index(
             "uq_schedule_exceptions_global_date",
+            "tenant_id",
             "exception_date",
             unique=True,
             postgresql_where="barber_id IS NULL",

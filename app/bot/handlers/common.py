@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -97,6 +98,7 @@ async def choose_language(
     callback: CallbackQuery,
     callback_data: LangCB,
     session: AsyncSession,
+    tenant_id: uuid.UUID,
     user: User,
     settings: Settings,
     is_admin: bool,
@@ -104,7 +106,7 @@ async def choose_language(
     chosen = normalize_language(callback_data.code, settings.default_language)
     if callback_data.code not in LANGUAGES:
         logger.info("Неизвестный код языка в callback: %s", callback_data.code)
-    await UserRepository(session).set_language(user, chosen)
+    await UserRepository(session, tenant_id).set_language(user, chosen)
     await session.commit()
 
     await edit_message(

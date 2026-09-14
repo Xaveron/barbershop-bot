@@ -8,7 +8,7 @@ from sqlalchemy import Select, and_, func, select, update
 from sqlalchemy.orm import joinedload
 
 from app.database.models import Appointment, AppointmentStatus, Barber, Service, User
-from app.database.repositories.base import BaseRepository
+from app.database.repositories.base import TenantScopedRepository
 
 
 def _with_relations(stmt: Select) -> Select:
@@ -19,9 +19,13 @@ def _with_relations(stmt: Select) -> Select:
     )
 
 
-class AppointmentRepository(BaseRepository):
+class AppointmentRepository(TenantScopedRepository):
     async def get(self, appointment_id: uuid.UUID) -> Appointment | None:
-        stmt = _with_relations(select(Appointment).where(Appointment.id == appointment_id))
+        stmt = _with_relations(
+            select(Appointment).where(
+                Appointment.id == appointment_id, Appointment.tenant_id == self.tenant_id
+            )
+        )
         return await self.session.scalar(stmt)
 
     async def list_for_barber_between(
@@ -35,6 +39,7 @@ class AppointmentRepository(BaseRepository):
     ) -> list[Appointment]:
         """Записи барбера, пересекающиеся с интервалом [start, end)."""
         stmt = select(Appointment).where(
+            Appointment.tenant_id == self.tenant_id,
             Appointment.barber_id == barber_id,
             Appointment.status.in_(statuses),
             Appointment.starts_at < end,
@@ -50,6 +55,7 @@ class AppointmentRepository(BaseRepository):
     ) -> list[Appointment]:
         stmt = _with_relations(
             select(Appointment).where(
+                Appointment.tenant_id == self.tenant_id,
                 Appointment.user_id == user_id,
                 Appointment.status == AppointmentStatus.CONFIRMED,
                 Appointment.ends_at > now,
@@ -62,6 +68,7 @@ class AppointmentRepository(BaseRepository):
             select(func.count())
             .select_from(Appointment)
             .where(
+                Appointment.tenant_id == self.tenant_id,
                 Appointment.user_id == user_id,
                 Appointment.status == AppointmentStatus.CONFIRMED,
                 Appointment.ends_at > now,
@@ -79,7 +86,9 @@ class AppointmentRepository(BaseRepository):
         offset: int = 0,
     ) -> list[Appointment]:
         stmt = select(Appointment).where(
-            Appointment.starts_at >= start, Appointment.starts_at < end
+            Appointment.tenant_id == self.tenant_id,
+            Appointment.starts_at >= start,
+            Appointment.starts_at < end,
         )
         if statuses:
             stmt = stmt.where(Appointment.status.in_(statuses))
@@ -109,29 +118,33 @@ class AppointmentRepository(BaseRepository):
         )
         zero = func.cast(0, Appointment.price.type)
 
-        stmt = select(
-            func.count().label("total"),
-            func.count()
-            .filter(
-                Appointment.status == AppointmentStatus.CONFIRMED,
-                Appointment.starts_at >= now,
+        stmt = (
+            select(
+                func.count().label("total"),
+                func.count()
+                .filter(
+                    Appointment.status == AppointmentStatus.CONFIRMED,
+                    Appointment.starts_at >= now,
+                )
+                .label("upcoming"),
+                func.count().filter(today_window).label("today"),
+                func.count().filter(month_window).label("month"),
+                func.count()
+                .filter(
+                    Appointment.starts_at >= month_start,
+                    Appointment.status == AppointmentStatus.CANCELLED,
+                )
+                .label("cancelled_month"),
+                func.coalesce(func.sum(Appointment.price).filter(month_window), zero).label(
+                    "revenue_month"
+                ),
+                func.coalesce(func.sum(Appointment.price).filter(today_window), zero).label(
+                    "revenue_today"
+                ),
             )
-            .label("upcoming"),
-            func.count().filter(today_window).label("today"),
-            func.count().filter(month_window).label("month"),
-            func.count()
-            .filter(
-                Appointment.starts_at >= month_start,
-                Appointment.status == AppointmentStatus.CANCELLED,
-            )
-            .label("cancelled_month"),
-            func.coalesce(func.sum(Appointment.price).filter(month_window), zero).label(
-                "revenue_month"
-            ),
-            func.coalesce(func.sum(Appointment.price).filter(today_window), zero).label(
-                "revenue_today"
-            ),
-        ).select_from(Appointment)
+            .select_from(Appointment)
+            .where(Appointment.tenant_id == self.tenant_id)
+        )
 
         row = (await self.session.execute(stmt)).one()
         return {
@@ -154,16 +167,19 @@ class AppointmentRepository(BaseRepository):
         stmt = (
             select(func.count())
             .select_from(Appointment)
-            .where(Appointment.starts_at >= start, Appointment.starts_at < end)
+            .where(
+                Appointment.tenant_id == self.tenant_id,
+                Appointment.starts_at >= start,
+                Appointment.starts_at < end,
+            )
         )
         if statuses:
             stmt = stmt.where(Appointment.status.in_(statuses))
         return await self.session.scalar(stmt) or 0
 
-    async def revenue_between(
-        self, *, start: datetime, end: datetime
-    ) -> float:
+    async def revenue_between(self, *, start: datetime, end: datetime) -> float:
         stmt = select(func.coalesce(func.sum(Appointment.price), 0)).where(
+            Appointment.tenant_id == self.tenant_id,
             Appointment.starts_at >= start,
             Appointment.starts_at < end,
             Appointment.status.in_(
@@ -181,6 +197,7 @@ class AppointmentRepository(BaseRepository):
             select(Service.name, total, revenue)
             .join(Appointment, Appointment.service_id == Service.id)
             .where(
+                Appointment.tenant_id == self.tenant_id,
                 Appointment.starts_at >= start,
                 Appointment.starts_at < end,
                 Appointment.status != AppointmentStatus.CANCELLED,
@@ -201,6 +218,7 @@ class AppointmentRepository(BaseRepository):
             select(Barber.name, total, revenue)
             .join(Appointment, Appointment.barber_id == Barber.id)
             .where(
+                Appointment.tenant_id == self.tenant_id,
                 Appointment.starts_at >= start,
                 Appointment.starts_at < end,
                 Appointment.status != AppointmentStatus.CANCELLED,
@@ -220,7 +238,11 @@ class AppointmentRepository(BaseRepository):
             .join(User, Appointment.user_id == User.id)
             .join(Barber, Appointment.barber_id == Barber.id)
             .join(Service, Appointment.service_id == Service.id)
-            .where(Appointment.starts_at >= start, Appointment.starts_at < end)
+            .where(
+                Appointment.tenant_id == self.tenant_id,
+                Appointment.starts_at >= start,
+                Appointment.starts_at < end,
+            )
             .order_by(Appointment.starts_at)
         )
         rows = await self.session.execute(stmt)
@@ -232,6 +254,7 @@ class AppointmentRepository(BaseRepository):
         """Завершённые записи, ends_at которых попадает в окно — для напоминания «вернись»."""
         stmt = _with_relations(
             select(Appointment).where(
+                Appointment.tenant_id == self.tenant_id,
                 Appointment.status == AppointmentStatus.COMPLETED,
                 Appointment.ends_at >= window_start,
                 Appointment.ends_at < window_end,
@@ -243,6 +266,7 @@ class AppointmentRepository(BaseRepository):
         stmt = (
             update(Appointment)
             .where(
+                Appointment.tenant_id == self.tenant_id,
                 Appointment.status == AppointmentStatus.CONFIRMED,
                 Appointment.ends_at <= now,
             )

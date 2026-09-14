@@ -15,6 +15,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.database import build_engine, build_session_factory, wait_for_database
 from app.database.models import Barber, Service, WorkingSchedule
+from app.database.tenants import resolve_default_tenant_id
 from app.utils.logging import mask_secrets, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -77,17 +78,29 @@ async def seed() -> None:
         logger.error("Не удалось подключиться к базе данных: %s", mask_secrets(str(exc)))
         return
 
+    tenant_id = await resolve_default_tenant_id(session_factory)
+
     async with session_factory() as session:
         for payload in DEFAULT_SERVICES:
-            exists = await session.scalar(select(Service).where(Service.name == payload["name"]))
+            exists = await session.scalar(
+                select(Service).where(
+                    Service.tenant_id == tenant_id, Service.name == payload["name"]
+                )
+            )
             if exists is None:
-                session.add(Service(**payload, currency=settings.default_currency))
+                session.add(
+                    Service(tenant_id=tenant_id, **payload, currency=settings.default_currency)
+                )
                 logger.info("Добавлена услуга: %s", payload["name"])
 
         for payload in DEFAULT_BARBERS:
-            barber = await session.scalar(select(Barber).where(Barber.name == payload["name"]))
+            barber = await session.scalar(
+                select(Barber).where(
+                    Barber.tenant_id == tenant_id, Barber.name == payload["name"]
+                )
+            )
             if barber is None:
-                barber = Barber(**payload)
+                barber = Barber(tenant_id=tenant_id, **payload)
                 session.add(barber)
                 await session.flush()
                 logger.info("Добавлен барбер: %s", payload["name"])
@@ -95,6 +108,7 @@ async def seed() -> None:
             for weekday, (start, end) in DEFAULT_WEEK.items():
                 schedule_exists = await session.scalar(
                     select(WorkingSchedule).where(
+                        WorkingSchedule.tenant_id == tenant_id,
                         WorkingSchedule.barber_id == barber.id,
                         WorkingSchedule.weekday == weekday,
                     )
@@ -102,6 +116,7 @@ async def seed() -> None:
                 if schedule_exists is None:
                     session.add(
                         WorkingSchedule(
+                            tenant_id=tenant_id,
                             barber_id=barber.id,
                             weekday=weekday,
                             start_time=start,

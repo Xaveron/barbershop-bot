@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import uuid
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -27,6 +28,7 @@ from app.bot.middlewares import (
 )
 from app.config import Settings, get_settings
 from app.database import build_engine, build_session_factory, wait_for_database
+from app.database.tenants import resolve_default_tenant_id
 from app.scheduler import build_scheduler
 from app.utils.logging import mask_secrets, setup_logging
 
@@ -57,10 +59,11 @@ def _build_storage(settings: Settings) -> MemoryStorage | RedisStorage:
     return MemoryStorage()
 
 
-def build_dispatcher(settings: Settings, session_factory) -> Dispatcher:
+def build_dispatcher(settings: Settings, session_factory, tenant_id: uuid.UUID) -> Dispatcher:
     dispatcher = Dispatcher(storage=_build_storage(settings))
     dispatcher["settings"] = settings
     dispatcher["session_factory"] = session_factory
+    dispatcher["tenant_id"] = tenant_id
 
     # Порядок важен: троттлинг → только личные чаты → сессия БД → пользователь.
     # Троттлинг стоит первым, чтобы флуд командами в группы (см. PrivateChatOnlyMiddleware)
@@ -97,6 +100,8 @@ async def run() -> None:
         logger.error("Не удалось подключиться к базе данных: %s", mask_secrets(str(exc)))
         return
 
+    tenant_id = await resolve_default_tenant_id(session_factory)
+
     session = None
     if settings.telegram_api_base:
         logger.info("Используется локальный Bot API server: %s", settings.telegram_api_base)
@@ -111,8 +116,8 @@ async def run() -> None:
     )
     # Страховка от лимитов Telegram на длину текста — на всех исходящих запросах.
     bot.session.middleware(TextLimitMiddleware())
-    dispatcher = build_dispatcher(settings, session_factory)
-    scheduler = build_scheduler(bot, session_factory, settings)
+    dispatcher = build_dispatcher(settings, session_factory, tenant_id)
+    scheduler = build_scheduler(bot, session_factory, settings, tenant_id)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

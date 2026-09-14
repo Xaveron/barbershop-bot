@@ -85,15 +85,16 @@ def _advisory_lock_key(entity_id: uuid.UUID) -> int:
 
 
 class BookingService:
-    def __init__(self, session: AsyncSession, settings: Settings) -> None:
+    def __init__(self, session: AsyncSession, settings: Settings, tenant_id: uuid.UUID) -> None:
         self.session = session
         self.settings = settings
+        self.tenant_id = tenant_id
         self.tz = settings.tz
-        self.appointments = AppointmentRepository(session)
-        self.services = ServiceRepository(session)
-        self.barbers = BarberRepository(session)
+        self.appointments = AppointmentRepository(session, tenant_id)
+        self.services = ServiceRepository(session, tenant_id)
+        self.barbers = BarberRepository(session, tenant_id)
         self.notifications = NotificationRepository(session)
-        self.schedule = ScheduleService(session, settings)
+        self.schedule = ScheduleService(session, settings, tenant_id)
 
     # --- Создание -----------------------------------------------------------
     async def create_appointment(
@@ -135,6 +136,7 @@ class BookingService:
             raise SlotUnavailableError("error.slot_busy")
 
         appointment = Appointment(
+            tenant_id=self.tenant_id,
             user_id=user.id,
             barber_id=barber.id,
             service_id=service.id,

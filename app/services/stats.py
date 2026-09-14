@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -27,12 +28,12 @@ class Stats:
 
 
 class StatsService:
-    def __init__(self, session: AsyncSession, settings: Settings) -> None:
+    def __init__(self, session: AsyncSession, settings: Settings, tenant_id: uuid.UUID) -> None:
         self.session = session
         self.settings = settings
         self.tz = settings.tz
-        self.appointments = AppointmentRepository(session)
-        self.users = UserRepository(session)
+        self.appointments = AppointmentRepository(session, tenant_id)
+        self.users = UserRepository(session, tenant_id)
 
     async def collect(self) -> Stats:
         """Собирает статистику за 4 запроса: сводка, клиенты и два топа."""

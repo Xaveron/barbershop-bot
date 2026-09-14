@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import timedelta
 
 from aiogram import F, Router
@@ -29,10 +30,14 @@ MAX_EXPORT_DAYS = 3650
 
 @router.callback_query(AdmCB.filter(F.action == "stats"))
 async def show_stats(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, settings: Settings
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
-    stats = await StatsService(session, settings).collect()
+    stats = await StatsService(session, settings, tenant_id).collect()
     lines = [
         "📊 <b>Статистика</b>\n",
         f"📅 Всего записей: <b>{stats.total_appointments}</b>",
@@ -59,11 +64,15 @@ async def show_stats(
 
 @router.callback_query(AdmCB.filter(F.action == "clients"))
 async def show_clients(
-    callback: CallbackQuery, callback_data: AdmCB, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
     page = int(callback_data.arg) if callback_data.arg.isdigit() else 0
-    repository = UserRepository(session)
+    repository = UserRepository(session, tenant_id)
     total = await repository.count()
     rows = await repository.list_with_appointment_counts(
         limit=CLIENTS_PAGE_SIZE, offset=page * CLIENTS_PAGE_SIZE
@@ -97,7 +106,11 @@ async def choose_export_period(callback: CallbackQuery, state: FSMContext) -> No
 
 @router.callback_query(AdmCB.filter(F.action == "export_do"))
 async def export_csv(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, settings: Settings
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     now = now_utc()
     if callback_data.arg == "all":
@@ -113,7 +126,9 @@ async def export_csv(
         return
 
     end = now + timedelta(days=3650)
-    payload = await ExportService(session, settings).appointments_csv(start=start, end=end)
+    payload = await ExportService(session, settings, tenant_id).appointments_csv(
+        start=start, end=end
+    )
     filename = f"appointments_{now.strftime('%Y%m%d_%H%M')}.csv"
     document = BufferedInputFile(payload, filename=filename)
 

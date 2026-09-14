@@ -30,6 +30,7 @@ class UserContextMiddleware(BaseMiddleware):
     ) -> Any:
         telegram_user: TelegramUser | None = data.get("event_from_user")
         session: AsyncSession | None = data.get("session")
+        tenant_id = data["tenant_id"]
 
         data["settings"] = self.settings
         data["is_admin"] = bool(
@@ -43,7 +44,7 @@ class UserContextMiddleware(BaseMiddleware):
         )
 
         if telegram_user is not None and not telegram_user.is_bot and session is not None:
-            repository = UserRepository(session)
+            repository = UserRepository(session, tenant_id)
             user = await repository.get_or_create(
                 telegram_id=telegram_user.id,
                 full_name=telegram_user.full_name[:255],

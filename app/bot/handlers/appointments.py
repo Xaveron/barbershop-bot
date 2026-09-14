@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date
 
 from aiogram import Bot, F, Router
@@ -38,9 +39,14 @@ router = Router(name="appointments")
 
 
 async def render_my_appointments(
-    callback: CallbackQuery, session: AsyncSession, settings: Settings, user: User, lang: str
+    callback: CallbackQuery,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    user: User,
+    lang: str,
 ) -> None:
-    booking = BookingService(session, settings)
+    booking = BookingService(session, settings, tenant_id)
     appointments = await booking.list_upcoming_for_user(user)
     if not appointments:
         await edit_message(
@@ -63,11 +69,12 @@ async def open_my_appointments(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     lang: str,
 ) -> None:
     await state.clear()
-    await render_my_appointments(callback, session, settings, user, lang)
+    await render_my_appointments(callback, session, settings, tenant_id, user, lang)
     await callback.answer()
 
 
@@ -78,14 +85,15 @@ async def view_appointment(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     lang: str,
 ) -> None:
     await state.clear()
-    appointment = await _get_own(callback_data.id, session, settings, user)
+    appointment = await _get_own(callback_data.id, session, settings, tenant_id, user)
     if appointment is None:
         await alert(callback, t("appointments.not_found", lang))
-        await render_my_appointments(callback, session, settings, user, lang)
+        await render_my_appointments(callback, session, settings, tenant_id, user, lang)
         return
     await edit_message(
         callback,
@@ -101,10 +109,11 @@ async def ask_cancel(
     callback_data: ApptCB,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     lang: str,
 ) -> None:
-    appointment = await _get_own(callback_data.id, session, settings, user)
+    appointment = await _get_own(callback_data.id, session, settings, tenant_id, user)
     if appointment is None:
         await alert(callback, t("appointments.not_found", lang))
         return
@@ -124,6 +133,7 @@ async def do_cancel(
     callback_data: ApptCB,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
@@ -135,7 +145,7 @@ async def do_cancel(
         await alert(callback, t("appointments.invalid", lang))
         return
 
-    booking = BookingService(session, settings)
+    booking = BookingService(session, settings, tenant_id)
     try:
         appointment = await booking.cancel_appointment(
             appointment_id=appointment_id,
@@ -144,7 +154,7 @@ async def do_cancel(
         )
     except BookingError as exc:
         await alert(callback, t(exc.key, lang, **exc.params))
-        await render_my_appointments(callback, session, settings, user, lang)
+        await render_my_appointments(callback, session, settings, tenant_id, user, lang)
         return
 
     await edit_message(
@@ -156,7 +166,7 @@ async def do_cancel(
     )
     await callback.answer(t("appointments.cancelled_toast", lang))
 
-    notifier = NotificationService(bot, session_factory, settings)
+    notifier = NotificationService(bot, session_factory, settings, tenant_id)
     await notifier.notify_cancelled(appointment, by_client=True)
 
 
@@ -168,17 +178,18 @@ async def start_reschedule(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     lang: str,
 ) -> None:
-    appointment = await _get_own(callback_data.id, session, settings, user)
+    appointment = await _get_own(callback_data.id, session, settings, tenant_id, user)
     if appointment is None:
         await alert(callback, t("appointments.not_found", lang))
         return
     await state.clear()
     await state.update_data(appointment_id=str(appointment.id), by_admin=False)
     await state.set_state(RescheduleSG.day)
-    await _render_reschedule_days(callback, state, session, settings, lang)
+    await _render_reschedule_days(callback, state, session, settings, tenant_id, lang)
     await callback.answer()
 
 
@@ -187,14 +198,15 @@ async def _render_reschedule_days(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
-    appointment = await _appointment_from_state(state, session, settings)
+    appointment = await _appointment_from_state(state, session, settings, tenant_id)
     if appointment is None:
         await alert(callback, t("appointments.not_found", lang))
         await state.clear()
         return
-    schedule = ScheduleService(session, settings)
+    schedule = ScheduleService(session, settings, tenant_id)
     days = await schedule.available_days(
         barber_id=appointment.barber_id,
         duration_minutes=appointment.duration_minutes,
@@ -225,6 +237,7 @@ async def reschedule_pick_day(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
     try:
@@ -233,7 +246,7 @@ async def reschedule_pick_day(
         await alert(callback, t("booking.bad_date", lang))
         return
     await state.update_data(day=day.isoformat())
-    await _render_reschedule_times(callback, state, session, settings, lang)
+    await _render_reschedule_times(callback, state, session, settings, tenant_id, lang)
     await callback.answer()
 
 
@@ -242,16 +255,17 @@ async def _render_reschedule_times(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
     data = await state.get_data()
-    appointment = await _appointment_from_state(state, session, settings)
+    appointment = await _appointment_from_state(state, session, settings, tenant_id)
     if appointment is None or not data.get("day"):
         await alert(callback, t("appointments.move_session_expired", lang))
         await state.clear()
         return
     day = date.fromisoformat(data["day"])
-    schedule = ScheduleService(session, settings)
+    schedule = ScheduleService(session, settings, tenant_id)
     slots = await schedule.available_slots(
         barber_id=appointment.barber_id,
         day=day,
@@ -260,7 +274,7 @@ async def _render_reschedule_times(
     )
     if not slots:
         await alert(callback, t("appointments.no_slots_for_day", lang))
-        await _render_reschedule_days(callback, state, session, settings, lang)
+        await _render_reschedule_days(callback, state, session, settings, tenant_id, lang)
         return
     await state.set_state(RescheduleSG.time)
     await edit_message(
@@ -276,9 +290,10 @@ async def reschedule_back_to_days(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
-    await _render_reschedule_days(callback, state, session, settings, lang)
+    await _render_reschedule_days(callback, state, session, settings, tenant_id, lang)
     await callback.answer()
 
 
@@ -289,10 +304,11 @@ async def reschedule_pick_time(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     lang: str,
 ) -> None:
     data = await state.get_data()
-    appointment = await _appointment_from_state(state, session, settings)
+    appointment = await _appointment_from_state(state, session, settings, tenant_id)
     if appointment is None or not data.get("day"):
         await alert(callback, t("appointments.move_session_expired", lang))
         await state.clear()
@@ -329,6 +345,7 @@ async def reschedule_confirm(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
@@ -346,7 +363,7 @@ async def reschedule_confirm(
 
     await state.clear()
     start_local = combine_local(date.fromisoformat(day_raw), hhmm_to_time(time_raw), settings.tz)
-    booking = BookingService(session, settings)
+    booking = BookingService(session, settings, tenant_id)
     try:
         appointment = await booking.reschedule_appointment(
             appointment_id=appointment_id,
@@ -356,7 +373,7 @@ async def reschedule_confirm(
         )
     except BookingError as exc:
         await alert(callback, t(exc.key, lang, **exc.params))
-        await render_my_appointments(callback, session, settings, user, lang)
+        await render_my_appointments(callback, session, settings, tenant_id, user, lang)
         return
 
     await edit_message(
@@ -368,7 +385,7 @@ async def reschedule_confirm(
     )
     await callback.answer(t("booking.done", lang))
 
-    notifier = NotificationService(bot, session_factory, settings)
+    notifier = NotificationService(bot, session_factory, settings, tenant_id)
     if by_admin:
         client_lang = client_language(appointment, settings)
         await notifier.notify_client(
@@ -395,32 +412,39 @@ async def reschedule_decline(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     user: User,
     lang: str,
 ) -> None:
     await state.clear()
-    await render_my_appointments(callback, session, settings, user, lang)
+    await render_my_appointments(callback, session, settings, tenant_id, user, lang)
     await callback.answer(t("appointments.move_cancelled", lang))
 
 
 # --- Вспомогательное --------------------------------------------------------
 async def _get_own(
-    raw_id: str, session: AsyncSession, settings: Settings, user: User
+    raw_id: str,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    user: User,
 ) -> Appointment | None:
     appointment_id = parse_uuid(raw_id)
     if appointment_id is None:
         return None
-    appointment = await BookingService(session, settings).get_appointment(appointment_id)
+    appointment = await BookingService(session, settings, tenant_id).get_appointment(
+        appointment_id
+    )
     if appointment is None or appointment.user_id != user.id:
         return None
     return appointment
 
 
 async def _appointment_from_state(
-    state: FSMContext, session: AsyncSession, settings: Settings
+    state: FSMContext, session: AsyncSession, settings: Settings, tenant_id: uuid.UUID
 ) -> Appointment | None:
     data = await state.get_data()
     appointment_id = parse_uuid(data.get("appointment_id", ""))
     if appointment_id is None:
         return None
-    return await BookingService(session, settings).get_appointment(appointment_id)
+    return await BookingService(session, settings, tenant_id).get_appointment(appointment_id)

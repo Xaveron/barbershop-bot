@@ -22,9 +22,10 @@ async def send_due_reminders(
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     """Рассылает напоминания за 24 часа и за 2 часа до визита."""
-    service = NotificationService(bot, session_factory, settings)
+    service = NotificationService(bot, session_factory, settings, tenant_id)
     try:
         _sent, errors = await service.dispatch_due()
         if errors:
@@ -41,6 +42,7 @@ async def send_due_reminders(
 async def schedule_return_reminders(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     """Планирует напоминание «пора к барберу» через N недель после последнего визита."""
     weeks = settings.return_reminder_weeks
@@ -54,7 +56,7 @@ async def schedule_return_reminders(
 
     async with session_factory() as session:
         try:
-            appt_repo = AppointmentRepository(session)
+            appt_repo = AppointmentRepository(session, tenant_id)
             notif_repo = NotificationRepository(session)
 
             appointments = await appt_repo.list_completed_in_ends_window(
@@ -90,11 +92,15 @@ async def schedule_return_reminders(
         logger.info("Запланировано напоминаний «пора к барберу»: %s", scheduled)
 
 
-async def complete_past_appointments(session_factory: async_sessionmaker[AsyncSession]) -> None:
+async def complete_past_appointments(
+    session_factory: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID
+) -> None:
     """Переводит прошедшие подтверждённые записи в статус «завершена»."""
     async with session_factory() as session:
         try:
-            updated = await AppointmentRepository(session).mark_past_as_completed(now=now_utc())
+            updated = await AppointmentRepository(session, tenant_id).mark_past_as_completed(
+                now=now_utc()
+            )
             await session.commit()
         except Exception:
             await session.rollback()

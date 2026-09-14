@@ -20,7 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.database.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from app.database.models.barber import Barber
@@ -49,7 +49,7 @@ ACTIVE_STATUSES: tuple[AppointmentStatus, ...] = (
 )
 
 
-class Appointment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+class Appointment(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """Запись клиента к барберу.
 
     Время хранится в UTC (timestamptz).
@@ -58,6 +58,8 @@ class Appointment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     (см. миграцию 0001): пересечение интервалов [starts_at, ends_at) для одного
     барбера невозможно, пока статус = 'confirmed'. Констрейнт создаётся сырым
     SQL, поэтому в metadata его нет — это осознанное решение ради совместимости.
+    Констрейнт ключуется по barber_id без tenant_id: barber_id — FK ровно на
+    одного арендатора, так что он уже однозначно разделяет арендаторов.
     """
 
     __tablename__ = "appointments"
@@ -68,6 +70,7 @@ class Appointment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_appointments_barber_id_starts_at", "barber_id", "starts_at"),
         Index("ix_appointments_user_id_starts_at", "user_id", "starts_at"),
         Index("ix_appointments_status_starts_at", "status", "starts_at"),
+        Index("ix_appointments_tenant_id_starts_at", "tenant_id", "starts_at"),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(

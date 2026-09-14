@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from decimal import Decimal
 
 from aiogram import F, Router
@@ -47,8 +48,10 @@ def service_card(service: Service) -> tuple[str, InlineKeyboardMarkup]:
     return text, admin_service_kb(service)
 
 
-async def services_list(session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
-    services = await ServiceRepository(session).list_all()
+async def services_list(
+    session: AsyncSession, tenant_id: uuid.UUID
+) -> tuple[str, InlineKeyboardMarkup]:
+    services = await ServiceRepository(session, tenant_id).list_all()
     if not services:
         return "💇 Услуг пока нет. Добавьте первую.", admin_services_kb(services)
     lines = ["💇 <b>Услуги</b>\n"]
@@ -62,19 +65,25 @@ async def services_list(session: AsyncSession) -> tuple[str, InlineKeyboardMarku
 
 
 @router.callback_query(AdmCB.filter(F.action == "services"))
-async def show_services(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+async def show_services(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
     await state.clear()
-    text, markup = await services_list(session)
+    text, markup = await services_list(session, tenant_id)
     await edit_message(callback, text, markup)
     await callback.answer()
 
 
 @router.callback_query(AdmCB.filter(F.action == "svc"))
 async def show_service(
-    callback: CallbackQuery, callback_data: AdmCB, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
-    service = await _get_service(callback_data.arg, session)
+    service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
         await alert(callback, "Услуга не найдена.")
         return
@@ -135,7 +144,11 @@ async def add_service_price(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminServiceSG.description)
 async def add_service_description(
-    message: Message, state: FSMContext, session: AsyncSession, settings: Settings
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     try:
         description = validate_description(message.text or "")
@@ -145,7 +158,7 @@ async def add_service_description(
 
     data = await state.get_data()
     await state.clear()
-    repository = ServiceRepository(session)
+    repository = ServiceRepository(session, tenant_id)
     try:
         service = await repository.create(
             name=data["name"],
@@ -176,9 +189,13 @@ _FIELD_PROMPTS = {
 
 @router.callback_query(AdmCB.filter(F.action.in_(set(_FIELD_PROMPTS))))
 async def edit_service_field(
-    callback: CallbackQuery, callback_data: AdmCB, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
 ) -> None:
-    service = await _get_service(callback_data.arg, session)
+    service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
         await alert(callback, "Услуга не найдена.")
         return
@@ -195,9 +212,9 @@ async def edit_service_field(
 
 @router.callback_query(AdmCB.filter(F.action == "svc_toggle"))
 async def toggle_service(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession
+    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    service = await _get_service(callback_data.arg, session)
+    service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
         await alert(callback, "Услуга не найдена.")
         return
@@ -210,9 +227,9 @@ async def toggle_service(
 
 @router.callback_query(AdmCB.filter(F.action == "svc_del"))
 async def ask_delete_service(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession
+    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    service = await _get_service(callback_data.arg, session)
+    service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
         await alert(callback, "Услуга не найдена.")
         return
@@ -228,13 +245,13 @@ async def ask_delete_service(
 
 @router.callback_query(AdmCB.filter(F.action == "svc_del_ok"))
 async def delete_service(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession
+    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
 ) -> None:
-    service = await _get_service(callback_data.arg, session)
+    service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
         await alert(callback, "Услуга не найдена.")
         return
-    repository = ServiceRepository(session)
+    repository = ServiceRepository(session, tenant_id)
     if await repository.has_appointments(service.id):
         await alert(callback, "По услуге есть активные записи — можно только скрыть её.")
         return
@@ -246,13 +263,15 @@ async def delete_service(
         logger.exception("Не удалось удалить услугу")
         await alert(callback, "Не удалось удалить: услуга используется в истории записей.")
         return
-    text, markup = await services_list(session)
+    text, markup = await services_list(session, tenant_id)
     await edit_message(callback, "🗑 Услуга удалена\n\n" + text, markup)
     await callback.answer("Удалено")
 
 
-async def _get_service(raw_id: str, session: AsyncSession) -> Service | None:
+async def _get_service(
+    raw_id: str, session: AsyncSession, tenant_id: uuid.UUID
+) -> Service | None:
     service_id = parse_uuid(raw_id)
     if service_id is None:
         return None
-    return await ServiceRepository(session).get(service_id)
+    return await ServiceRepository(session, tenant_id).get(service_id)

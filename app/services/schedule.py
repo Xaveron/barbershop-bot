@@ -46,12 +46,13 @@ def _to_window(schedule: WorkingSchedule) -> WorkWindow:
 
 
 class ScheduleService:
-    def __init__(self, session: AsyncSession, settings: Settings) -> None:
+    def __init__(self, session: AsyncSession, settings: Settings, tenant_id: uuid.UUID) -> None:
         self.session = session
         self.settings = settings
+        self.tenant_id = tenant_id
         self.tz = settings.tz
-        self.schedules = ScheduleRepository(session)
-        self.appointments = AppointmentRepository(session)
+        self.schedules = ScheduleRepository(session, tenant_id)
+        self.appointments = AppointmentRepository(session, tenant_id)
 
     # --- Публичное API ------------------------------------------------------
     async def available_days(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
@@ -45,12 +46,13 @@ async def show_appointments(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
     page = int(callback_data.arg) if callback_data.arg.isdigit() else 0
     now = now_utc()
     horizon = now + timedelta(days=365)
-    repository = AppointmentRepository(session)
+    repository = AppointmentRepository(session, tenant_id)
     total = await repository.count_between(
         start=now, end=horizon, statuses=(AppointmentStatus.CONFIRMED,)
     )
@@ -83,11 +85,14 @@ async def show_appointment(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
     appointment_id = parse_uuid(callback_data.arg)
     appointment = (
-        await AppointmentRepository(session).get(appointment_id) if appointment_id else None
+        await AppointmentRepository(session, tenant_id).get(appointment_id)
+        if appointment_id
+        else None
     )
     if appointment is None:
         await alert(callback, "Запись не найдена.")
@@ -107,6 +112,7 @@ async def cancel_appointment(
     callback_data: AdmCB,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -115,7 +121,7 @@ async def cancel_appointment(
         await alert(callback, "Некорректная запись.")
         return
     try:
-        appointment = await BookingService(session, settings).cancel_appointment(
+        appointment = await BookingService(session, settings, tenant_id).cancel_appointment(
             appointment_id=appointment_id, cancelled_by=CancelledBy.ADMIN
         )
     except BookingError as exc:
@@ -130,7 +136,7 @@ async def cancel_appointment(
     )
     await callback.answer("Отменено")
 
-    notifier = NotificationService(bot, session_factory, settings)
+    notifier = NotificationService(bot, session_factory, settings, tenant_id)
     lang = client_language(appointment, settings)
     await notifier.notify_client(
         appointment.user.telegram_id,
@@ -148,6 +154,7 @@ async def mark_no_show(
     callback_data: AdmCB,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     """Клиент не пришёл: запись закрывается, напоминания снимаются."""
     appointment_id = parse_uuid(callback_data.arg)
@@ -155,7 +162,7 @@ async def mark_no_show(
         await alert(callback, "Некорректная запись.")
         return
     try:
-        appointment = await BookingService(session, settings).mark_no_show(
+        appointment = await BookingService(session, settings, tenant_id).mark_no_show(
             appointment_id=appointment_id
         )
     except BookingError as exc:
@@ -178,10 +185,13 @@ async def move_appointment(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     appointment_id = parse_uuid(callback_data.arg)
     appointment = (
-        await AppointmentRepository(session).get(appointment_id) if appointment_id else None
+        await AppointmentRepository(session, tenant_id).get(appointment_id)
+        if appointment_id
+        else None
     )
     if appointment is None:
         await alert(callback, "Запись не найдена.")
@@ -189,7 +199,9 @@ async def move_appointment(
     await state.clear()
     await state.update_data(appointment_id=str(appointment.id), by_admin=True)
     await state.set_state(RescheduleSG.day)
-    await _render_reschedule_days(callback, state, session, settings, settings.default_language)
+    await _render_reschedule_days(
+        callback, state, session, settings, tenant_id, settings.default_language
+    )
     await callback.answer()
 
 
@@ -203,10 +215,11 @@ async def show_bulk_cancel_days(
     state: FSMContext,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     await state.clear()
     now = now_utc()
-    appointments = await AppointmentRepository(session).list_between(
+    appointments = await AppointmentRepository(session, tenant_id).list_between(
         start=now,
         end=now + timedelta(days=30),
         statuses=(AppointmentStatus.CONFIRMED,),
@@ -237,6 +250,7 @@ async def confirm_bulk_cancel(
     callback_data: AdmCB,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
 ) -> None:
     try:
         selected_date = date.fromisoformat(callback_data.arg)
@@ -246,7 +260,7 @@ async def confirm_bulk_cancel(
 
     day_start = combine_local(selected_date, datetime.min.time(), settings.tz)
     day_end = day_start + timedelta(days=1)
-    count = await AppointmentRepository(session).count_between(
+    count = await AppointmentRepository(session, tenant_id).count_between(
         start=day_start, end=day_end, statuses=(AppointmentStatus.CONFIRMED,)
     )
     if count == 0:
@@ -271,6 +285,7 @@ async def execute_bulk_cancel(
     callback_data: AdmCB,
     session: AsyncSession,
     settings: Settings,
+    tenant_id: uuid.UUID,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -283,7 +298,7 @@ async def execute_bulk_cancel(
     day_start = combine_local(selected_date, datetime.min.time(), settings.tz)
     day_end = day_start + timedelta(days=1)
 
-    repository = AppointmentRepository(session)
+    repository = AppointmentRepository(session, tenant_id)
     notifications_repo = NotificationRepository(session)
     appointments = await repository.list_between(
         start=day_start, end=day_end,
@@ -314,7 +329,7 @@ async def execute_bulk_cancel(
     )
     await callback.answer(f"Отменено: {count}")
 
-    notifier = NotificationService(bot, session_factory, settings)
+    notifier = NotificationService(bot, session_factory, settings, tenant_id)
     for appt in appointments:
         lang = client_language(appt, settings)
         await notifier.notify_client(
