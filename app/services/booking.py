@@ -79,9 +79,9 @@ class TooManyActiveAppointmentsError(BookingError):
     pass
 
 
-def _advisory_lock_key(barber_id: uuid.UUID) -> int:
-    """Стабильный bigint-ключ блокировки из UUID барбера."""
-    return int.from_bytes(barber_id.bytes[:8], "big", signed=True)
+def _advisory_lock_key(entity_id: uuid.UUID) -> int:
+    """Стабильный bigint-ключ блокировки из UUID (барбера или клиента)."""
+    return int.from_bytes(entity_id.bytes[:8], "big", signed=True)
 
 
 class BookingService:
@@ -113,6 +113,9 @@ class BookingService:
             raise BookingError("error.barber_unavailable")
 
         now = now_utc()
+        # Лочим клиента до чтения счётчика: иначе два параллельных запроса на
+        # разных барберов/слотах оба проскочат проверку лимита до commit друг друга.
+        await self._lock_user(user.id)
         active = await self.appointments.count_active_for_user(user_id=user.id, now=now)
         try:
             rules.ensure_within_limit(active, self.settings.max_active_appointments)
@@ -279,7 +282,19 @@ class BookingService:
 
     async def _lock_barber(self, barber_id: uuid.UUID) -> None:
         """Transaction-scoped advisory lock — сериализует записи к одному барберу."""
-        lock_key = _advisory_lock_key(barber_id)
+        await self._acquire_lock(barber_id, what="барбер")
+
+    async def _lock_user(self, user_id: uuid.UUID) -> None:
+        """Transaction-scoped advisory lock — сериализует создание записей одним клиентом.
+
+        Без неё две параллельные заявки одного клиента (разные барберы/слоты, поэтому
+        _lock_barber их не разводит) обе читают count_active_for_user до commit друг
+        друга и обе проходят проверку max_active_appointments — TOCTOU-гонка.
+        """
+        await self._acquire_lock(user_id, what="клиент")
+
+    async def _acquire_lock(self, entity_id: uuid.UUID, *, what: str) -> None:
+        lock_key = _advisory_lock_key(entity_id)
         for attempt in range(1, LOCK_ATTEMPTS + 1):
             acquired = await self.session.scalar(
                 text("SELECT pg_try_advisory_xact_lock(CAST(:lock_key AS bigint))"),
@@ -287,11 +302,11 @@ class BookingService:
             )
             if acquired:
                 return
-            logger.debug("Барбер %s занят другой транзакцией (попытка %s)", barber_id, attempt)
+            logger.debug("%s %s занят другой транзакцией (попытка %s)", what, entity_id, attempt)
             delay = min(LOCK_RETRY_MIN_DELAY * 2 ** (attempt - 1), LOCK_RETRY_MAX_DELAY)
             await asyncio.sleep(delay)
 
-        logger.warning("Не удалось взять блокировку по барберу %s", barber_id)
+        logger.warning("Не удалось взять блокировку (%s %s)", what, entity_id)
         raise BookingError("error.barber_locked")
 
     async def _plan_reminders(self, appointment: Appointment) -> None:

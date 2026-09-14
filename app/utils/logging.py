@@ -8,7 +8,7 @@ import sys
 from typing import Final
 
 _TOKEN_RE: Final = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b")
-_DSN_RE: Final = re.compile(r"(?P<scheme>\w+(?:\+\w+)?://)(?P<user>[^:/@\s]+):(?P<pwd>[^@/\s]+)@")
+_DSN_RE: Final = re.compile(r"(?P<scheme>\w+(?:\+\w+)?://)(?P<user>[^:/@\s]+):(?P<pwd>[^/\s]+)@")
 _SECRET_KV_RE: Final = re.compile(
     r"(?i)\b(bot_token|token|password|passwd|secret|api_key)\b\s*[=:]\s*\S+"
 )

@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from app.utils.logging import mask_secrets
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +33,9 @@ def build_engine(database_url: str, *, echo: bool = False) -> AsyncEngine:
     return create_async_engine(
         database_url,
         echo=echo,
+        # Параметры запросов (могут содержать ПДн) никогда не попадают в лог/исключения,
+        # даже если echo=True — включённый SQL_ECHO должен показывать только сами запросы.
+        hide_parameters=True,
         pool_size=10,
         max_overflow=10,
         pool_pre_ping=True,
@@ -64,6 +69,8 @@ async def wait_for_database(engine: AsyncEngine, *, attempts: int = 15, delay: f
             return
         except Exception as exc:
             last_error = exc
-            logger.warning("База недоступна (попытка %s/%s): %s", attempt, attempts, exc)
+            logger.warning(
+                "База недоступна (попытка %s/%s): %s", attempt, attempts, mask_secrets(str(exc))
+            )
             await asyncio.sleep(delay)
-    raise RuntimeError(f"Не удалось подключиться к базе данных: {last_error}")
+    raise RuntimeError(f"Не удалось подключиться к базе данных: {mask_secrets(str(last_error))}")

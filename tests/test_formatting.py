@@ -113,6 +113,13 @@ def test_logging_masks_secrets():
     assert "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw" not in masked
 
 
+def test_logging_masks_dsn_password_containing_at_sign():
+    """Пароль с '@' — самый первый '@' не должен путаться с разделителем хоста."""
+    masked = mask_secrets("postgresql+asyncpg://user:p@ssword@db:5432/app")
+    assert "ssword" not in masked
+    assert masked == "postgresql+asyncpg://user:***@db:5432/app"
+
+
 # --- format_datetime ---------------------------------------------------------
 def test_format_datetime_converts_utc_to_local_and_localizes():
     stored = datetime(2026, 9, 15, 11, 30, tzinfo=UTC)  # летом Кишинёв UTC+3
