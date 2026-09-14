@@ -23,7 +23,14 @@ async def send_due_reminders(
     """Рассылает напоминания за 24 часа и за 2 часа до визита."""
     service = NotificationService(bot, session_factory, settings)
     try:
-        await service.dispatch_due()
+        sent, errors = await service.dispatch_due()
+        if errors:
+            logger.warning("Напоминаний с ошибкой: %s", errors)
+            await service.notify_admins(
+                f"⚠️ <b>Ошибка доставки напоминаний</b>\n\n"
+                f"Не удалось доставить: {errors} шт.\n"
+                f"Проверьте логи бота."
+            )
     except Exception:
         logger.exception("Ошибка при рассылке напоминаний")
 

@@ -50,9 +50,13 @@ class NotificationService:
         self.tz = settings.tz
 
     # --- Фоновая рассылка ---------------------------------------------------
-    async def dispatch_due(self, *, batch_size: int = 30) -> int:
-        """Отправляет напоминания, время которых наступило. Возвращает число отправленных."""
+    async def dispatch_due(self, *, batch_size: int = 30) -> tuple[int, int]:
+        """Отправляет напоминания, время которых наступило.
+
+        Возвращает (sent, errors): отправлено и сколько упало с неожиданной ошибкой.
+        """
         sent = 0
+        errors = 0
         async with self.session_factory() as session:
             repository = NotificationRepository(session)
             users = UserRepository(session)
@@ -71,6 +75,7 @@ class NotificationService:
                         logger.exception(
                             "Неожиданная ошибка при доставке напоминания %s", notification.id
                         )
+                        errors += 1
                 await session.commit()
             except Exception:
                 await session.rollback()
@@ -78,7 +83,7 @@ class NotificationService:
                 raise
         if sent:
             logger.info("Отправлено напоминаний: %s", sent)
-        return sent
+        return sent, errors
 
     async def _deliver(
         self,

@@ -1,4 +1,16 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: barbershop_redis
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   db:
     image: postgres:16-alpine
     container_name: barbershop_db
@@ -28,14 +40,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file:
       - .env
     environment:
-      # URL всегда указывает на сервис db внутри compose-сети и перекрывает значение из .env
+      # URL-ы всегда указывают на сервисы внутри compose-сети и перекрывают значения из .env
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-barber}:${POSTGRES_PASSWORD:-barber}@db:5432/${POSTGRES_DB:-barbershop}
+      REDIS_URL: redis://redis:6379/0
       TZ: UTC
     # 20 секунд хватает, чтобы бот корректно завершил polling и закрыл соединения
     stop_grace_period: 20s
 
 volumes:
   pgdata:
+  redisdata:

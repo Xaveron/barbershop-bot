@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     max_active_appointments: int = Field(default=3, ge=1, le=20)
     max_slots_per_day: int = Field(default=60, ge=10, le=100)
 
+    # --- Redis (FSM-хранилище) ----------------------------------------------
+    # Если задан — FSM-состояния хранятся в Redis (не теряются при перезапуске).
+    redis_url: str = Field(default="", validation_alias="REDIS_URL")
+
     # --- Антифлуд -----------------------------------------------------------
     throttle_interval: float = Field(default=0.4, ge=0.0, le=10.0)
     throttle_burst: int = Field(default=10, ge=1, le=100)
