@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import Select, and_, func, select
+from sqlalchemy import Select, and_, func, select, update
 from sqlalchemy.orm import joinedload
 
 from app.database.models import Appointment, AppointmentStatus, Barber, Service, User
@@ -227,13 +227,13 @@ class AppointmentRepository(BaseRepository):
         return [(row[0], row[1], row[2], row[3]) for row in rows.all()]
 
     async def mark_past_as_completed(self, *, now: datetime) -> int:
-        stmt = select(Appointment).where(
-            Appointment.status == AppointmentStatus.CONFIRMED,
-            Appointment.ends_at <= now,
+        stmt = (
+            update(Appointment)
+            .where(
+                Appointment.status == AppointmentStatus.CONFIRMED,
+                Appointment.ends_at <= now,
+            )
+            .values(status=AppointmentStatus.COMPLETED)
         )
-        appointments = list(await self.session.scalars(stmt))
-        for appointment in appointments:
-            appointment.status = AppointmentStatus.COMPLETED
-        if appointments:
-            await self.session.flush()
-        return len(appointments)
+        result = await self.session.execute(stmt)
+        return result.rowcount or 0
