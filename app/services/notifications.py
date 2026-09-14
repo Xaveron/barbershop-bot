@@ -16,7 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.i18n import normalize_language, t
 from app.config import Settings
-from app.database.models import Appointment, AppointmentStatus, Notification, NotificationKind
+from app.database.models import (
+    Appointment,
+    AppointmentStatus,
+    Notification,
+    NotificationKind,
+)
 from app.database.repositories import NotificationRepository, UserRepository
 from app.services.formatting import appointment_card
 from app.utils.dt import now_utc
@@ -92,6 +97,9 @@ class NotificationService:
         repository: NotificationRepository,
         users: UserRepository,
     ) -> bool:
+        if notification.kind == NotificationKind.RETURN_REMINDER:
+            return await self._deliver_return(notification, appointment, repository, users)
+
         # Защитные проверки: очередь могла пережить отмену записи или блокировку бота.
         if appointment.status is not AppointmentStatus.CONFIRMED:
             logger.info(
@@ -126,6 +134,39 @@ class NotificationService:
             return False
         except (TelegramBadRequest, TelegramNetworkError) as exc:
             logger.warning("Ошибка отправки напоминания: %s", exc)
+            await repository.mark_failed(notification, error=str(exc))
+            return False
+        await repository.mark_sent(notification, now=now_utc())
+        return True
+
+    async def _deliver_return(
+        self,
+        notification: Notification,
+        appointment: Appointment,
+        repository: NotificationRepository,
+        users: UserRepository,
+    ) -> bool:
+        if appointment.user.is_blocked:
+            await repository.mark_failed(notification, error="user blocked the bot")
+            return False
+
+        lang = client_language(appointment, self.settings)
+        weeks = self.settings.return_reminder_weeks
+        text = t("notify.return_reminder", lang, weeks=weeks, shop=esc(self.settings.shop_name))
+        try:
+            await self.bot.send_message(appointment.user.telegram_id, text)
+        except TelegramRetryAfter as exc:
+            logger.warning("Flood control: ждём %s c", exc.retry_after)
+            await asyncio.sleep(min(exc.retry_after, 30))
+            await repository.mark_failed(notification, error=f"retry_after={exc.retry_after}")
+            return False
+        except TelegramForbiddenError:
+            logger.info("Пользователь %s заблокировал бота", appointment.user.telegram_id)
+            await users.set_blocked(appointment.user_id, blocked=True)
+            await repository.mark_failed(notification, error="bot blocked by user")
+            return False
+        except (TelegramBadRequest, TelegramNetworkError) as exc:
+            logger.warning("Ошибка отправки напоминания «вернись»: %s", exc)
             await repository.mark_failed(notification, error=str(exc))
             return False
         await repository.mark_sent(notification, now=now_utc())

@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     max_active_appointments: int = Field(default=3, ge=1, le=20)
     max_slots_per_day: int = Field(default=60, ge=10, le=100)
 
+    # --- Напоминание «пора к барберу» ---------------------------------------
+    # Через сколько недель после последнего визита напомнить записаться снова.
+    # 0 — отключить.
+    return_reminder_weeks: int = Field(
+        default=3, ge=0, le=52, validation_alias="RETURN_REMINDER_WEEKS"
+    )
+
     # --- Redis (FSM-хранилище) ----------------------------------------------
     # Если задан — FSM-состояния хранятся в Redis (не теряются при перезапуске).
     redis_url: str = Field(default="", validation_alias="REDIS_URL")

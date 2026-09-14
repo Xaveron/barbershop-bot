@@ -226,6 +226,19 @@ class AppointmentRepository(BaseRepository):
         rows = await self.session.execute(stmt)
         return [(row[0], row[1], row[2], row[3]) for row in rows.all()]
 
+    async def list_completed_in_ends_window(
+        self, *, window_start: datetime, window_end: datetime
+    ) -> list[Appointment]:
+        """Завершённые записи, ends_at которых попадает в окно — для напоминания «вернись»."""
+        stmt = _with_relations(
+            select(Appointment).where(
+                Appointment.status == AppointmentStatus.COMPLETED,
+                Appointment.ends_at >= window_start,
+                Appointment.ends_at < window_end,
+            )
+        ).order_by(Appointment.ends_at.desc())
+        return list((await self.session.scalars(stmt)).unique())
+
     async def mark_past_as_completed(self, *, now: datetime) -> int:
         stmt = (
             update(Appointment)

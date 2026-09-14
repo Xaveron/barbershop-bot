@@ -11,7 +11,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.scheduler.jobs import complete_past_appointments, send_due_reminders
+from app.scheduler.jobs import (
+    complete_past_appointments,
+    schedule_return_reminders,
+    send_due_reminders,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,13 @@ def build_scheduler(
         id="complete_past_appointments",
         replace_existing=True,
         kwargs={"session_factory": session_factory},
+    )
+    scheduler.add_job(
+        schedule_return_reminders,
+        trigger=IntervalTrigger(hours=6),
+        id="schedule_return_reminders",
+        replace_existing=True,
+        kwargs={"session_factory": session_factory, "settings": settings},
     )
     logger.info("Планировщик сконфигурирован: %s задач", len(scheduler.get_jobs()))
     return scheduler
