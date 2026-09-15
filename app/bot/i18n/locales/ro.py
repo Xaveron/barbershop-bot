@@ -243,4 +243,40 @@ MESSAGES: dict[str, str] = {
     "onboarding.activation_blocked": (
         "Încă nu poți lansa — finalizează mai întâi configurarea (vezi lista de mai sus)."
     ),
+    # --- Facturare (Phase 6) --------------------------------------------------
+    "billing.limit_reached": (
+        "Limita planului a fost atinsă pentru «{limit_name}»: {current}/{maximum}."
+    ),
+    "billing.feature_not_available": (
+        "Funcția «{feature_name}» nu este disponibilă în planul tău."
+    ),
+    "billing.subscription_inactive": (
+        "Abonamentul este inactiv. Contactează proprietarul salonului."
+    ),
+    "billing.try_again": "Nu s-a putut procesa cererea, încearcă din nou.",
+    "billing.limit.max_branches": "Sucursale",
+    "billing.limit.max_barbers": "Frizeri",
+    "billing.limit.max_staff": "Personal",
+    "billing.limit.max_services": "Servicii",
+    "billing.limit.max_monthly_appointments": "Programări pe lună",
+    "billing.feature.basic_booking": "Programare de bază",
+    "billing.feature.reminders": "Mementouri",
+    "billing.feature.csv_export": "Export CSV",
+    "billing.feature.analytics": "Analitică",
+    "billing.status.trialing": "Perioadă de probă",
+    "billing.status.active": "Activ",
+    "billing.status.past_due": "Restanță",
+    "billing.status.canceled": "Anulat",
+    "billing.status.expired": "Expirat",
+    "billing.screen_title": "💳 Plan",
+    "billing.current_plan": "Plan: <b>{plan_name}</b>",
+    "billing.subscription_status": "Stare abonament: {status}",
+    "billing.features_header": "Funcții:",
+    "billing.limits_header": "Limite:",
+    "billing.limit_line": "{limit_name}: {current}/{maximum}",
+    "billing.limit_line_unlimited": "{limit_name}: {current}/∞",
+    "billing.feature_line_on": "✅ {feature_name}",
+    "billing.feature_line_off": "🚫 {feature_name}",
+    "billing.dev_change_plan_btn": "🔧 [dev] Schimbă planul: {plan_name}",
+    "billing.plan_changed": "Planul a fost schimbat în «{plan_name}».",
 }

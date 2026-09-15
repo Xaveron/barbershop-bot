@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.billing_ui import describe_billing_error
 from app.bot.keyboards.admin import (
     admin_service_branches_kb,
     admin_service_kb,
@@ -25,6 +26,8 @@ from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
 from app.database.models import Permission, Service
 from app.database.repositories import BranchRepository, ServiceRepository
+from app.services.billing import BillingError
+from app.services.provisioning import ServiceProvisioningService
 from app.utils.dt import format_duration
 from app.utils.text import esc, money
 from app.utils.validators import (
@@ -223,6 +226,7 @@ async def add_service_description(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
     try:
         description = validate_description(message.text or "")
@@ -232,9 +236,9 @@ async def add_service_description(
 
     data = await state.get_data()
     await state.clear()
-    repository = ServiceRepository(session, tenant_id)
+    provisioning = ServiceProvisioningService(session, tenant_id)
     try:
-        service = await repository.create(
+        service = await provisioning.create_service(
             name=data["name"],
             duration_minutes=int(data["duration"]),
             price=Decimal(data["price"]),
@@ -242,6 +246,10 @@ async def add_service_description(
             currency=settings.default_currency,
         )
         await session.commit()
+    except BillingError as exc:
+        await session.rollback()
+        await message.answer(f"⚠️ {describe_billing_error(exc, lang)}")
+        return
     except Exception:
         await session.rollback()
         logger.exception("Не удалось создать услугу")

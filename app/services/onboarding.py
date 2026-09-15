@@ -22,17 +22,22 @@ from app.database.models import (
     Branch,
     Role,
     StaffMember,
+    SubscriptionStatus,
     Tenant,
     TenantStatus,
     WorkingSchedule,
 )
 from app.database.repositories import (
     BranchRepository,
+    PlanRepository,
     ServiceRepository,
     StaffRepository,
+    SubscriptionRepository,
     TenantRepository,
 )
+from app.services.billing import DEFAULT_PLAN_CODE
 from app.services.staff import StaffService
+from app.utils.dt import now_utc
 
 
 @dataclass(slots=True)
@@ -186,8 +191,19 @@ class TenantOnboardingService:
         процесс = один tenant_id" (см. app/main.py) нет достижимого UI
         "создать ещё один арендатор в этом же боте"; это протестированный
         сервисный примитив для оператора/будущей платформенной обвязки, а не
-        SQL-вставка руками (см. docs/TENANT_ONBOARDING_DESIGN.md §15)."""
+        SQL-вставка руками (см. docs/TENANT_ONBOARDING_DESIGN.md §15).
+
+        С Phase 6 в той же транзакции заводит Subscription(FREE, ACTIVE) —
+        у арендатора не может быть момента без подписки (см.
+        docs/BILLING_DESIGN.md §Existing-tenant backfill)."""
         tenant = Tenant(name=name, slug=slug, timezone=timezone, currency=currency)
         session.add(tenant)
+        await session.flush()
+        plan = await PlanRepository(session).get_by_code(DEFAULT_PLAN_CODE)
+        if plan is None:
+            raise RuntimeError(f"Тариф по умолчанию '{DEFAULT_PLAN_CODE}' не найден в каталоге.")
+        await SubscriptionRepository(session, tenant.id).create(
+            plan_id=plan.id, status=SubscriptionStatus.ACTIVE, current_period_start=now_utc()
+        )
         await session.commit()
         return tenant

@@ -20,10 +20,12 @@ from app.config import Settings
 from app.database.models import (
     Appointment,
     AppointmentStatus,
+    Feature,
     Notification,
     NotificationKind,
 )
 from app.database.repositories import NotificationRepository, UserRepository
+from app.services.billing import EntitlementService
 from app.services.formatting import appointment_card
 from app.utils.dt import now_utc
 from app.utils.text import esc
@@ -65,6 +67,16 @@ class NotificationService:
         sent = 0
         errors = 0
         async with self.session_factory() as session:
+            # Тихо ничего не отправляем на тарифе без REMINDERS — это не
+            # ошибка клиента и не BillingError: очередь фоновая, поднимать
+            # её тут некому (см. docs/BILLING_DESIGN.md §Enforcement).
+            # notify_new_appointment/notify_cancelled — операционные
+            # уведомления владельцу, а не «напоминание», и этим лимитом
+            # не гейтятся.
+            if not await EntitlementService(session, self.tenant_id).has_feature(
+                Feature.REMINDERS
+            ):
+                return sent, errors
             repository = NotificationRepository(session)
             users = UserRepository(session, self.tenant_id)
             try:

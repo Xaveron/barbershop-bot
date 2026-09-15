@@ -22,6 +22,7 @@ from app.database.models import (
     Appointment,
     AppointmentStatus,
     CancelledBy,
+    LimitKey,
     NotificationKind,
     User,
 )
@@ -34,8 +35,10 @@ from app.database.repositories import (
     ServiceRepository,
 )
 from app.services import rules
+from app.services.billing import LimitService
 from app.services.schedule import ScheduleService
 from app.utils.dt import now_utc, to_utc
+from app.utils.locks import advisory_lock_key as _advisory_lock_key
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +84,6 @@ class TooManyActiveAppointmentsError(BookingError):
     pass
 
 
-def _advisory_lock_key(entity_id: uuid.UUID) -> int:
-    """Стабильный bigint-ключ блокировки из UUID (барбера или клиента)."""
-    return int.from_bytes(entity_id.bytes[:8], "big", signed=True)
-
-
 class BookingService:
     def __init__(self, session: AsyncSession, settings: Settings, tenant_id: uuid.UUID) -> None:
         self.session = session
@@ -97,6 +95,7 @@ class BookingService:
         self.branches = BranchRepository(session, tenant_id)
         self.barber_services = BarberServiceRepository(session, tenant_id)
         self.notifications = NotificationRepository(session)
+        self.limits = LimitService(session, tenant_id)
         # Не строим ScheduleService здесь: branch_id — параметр конкретного
         # вызова (create_appointment получает выбранный клиентом филиал,
         # reschedule_appointment — филиал уже существующей записи), а не
@@ -155,6 +154,12 @@ class BookingService:
         )
         if not free:
             raise SlotUnavailableError("error.slot_busy")
+
+        # Лимит тарифа — после проверки слота (не тратим лок на заведомо
+        # недоступное время), но до вставки: тот же tenant-scoped advisory
+        # lock, что и у provisioning-сервисов, не пересекается с локами
+        # клиента/барбера выше (см. docs/BILLING_DESIGN.md §Concurrency).
+        await self.limits.assert_can_create(LimitKey.MAX_MONTHLY_APPOINTMENTS)
 
         appointment = Appointment(
             tenant_id=self.tenant_id,

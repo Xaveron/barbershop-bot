@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.billing_ui import describe_billing_error
 from app.bot.keyboards.admin import (
     admin_barber_branches_kb,
     admin_barber_kb,
@@ -23,6 +24,8 @@ from app.bot.states import AdminBarberSG, AdminFieldSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.database.models import Barber, Permission
 from app.database.repositories import BarberRepository, BranchRepository, ScheduleRepository
+from app.services.billing import BillingError
+from app.services.provisioning import BarberProvisioningService
 from app.utils.dt import WEEKDAYS_SHORT, format_time
 from app.utils.text import esc
 from app.utils.validators import ValidationError, validate_description, validate_name
@@ -191,7 +194,7 @@ async def add_barber_name(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminBarberSG.description)
 async def add_barber_description(
-    message: Message, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
+    message: Message, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID, lang: str
 ) -> None:
     try:
         description = validate_description(message.text or "")
@@ -201,7 +204,7 @@ async def add_barber_description(
     data = await state.get_data()
     await state.clear()
     try:
-        barber = await BarberRepository(session, tenant_id).create(
+        barber = await BarberProvisioningService(session, tenant_id).create_barber(
             name=data["name"], description=description
         )
         # Единственный активный филиал — привязываем автоматически, чтобы для
@@ -214,6 +217,10 @@ async def add_barber_description(
                 barber_id=barber.id, branch_id=branches[0].id
             )
         await session.commit()
+    except BillingError as exc:
+        await session.rollback()
+        await message.answer(f"⚠️ {describe_billing_error(exc, lang)}")
+        return
     except Exception:
         await session.rollback()
         logger.exception("Не удалось создать барбера")

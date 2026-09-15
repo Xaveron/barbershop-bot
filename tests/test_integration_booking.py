@@ -1062,11 +1062,12 @@ async def test_booking_keeps_query_count_bounded(
         )
 
     inserts = [q for q in query_counter if q.lstrip().upper().startswith("INSERT")]
-    # 14 запросов: услуга, барбер, филиал, барбер-в-филиале,
+    # 16 запросов: услуга, барбер, филиал, барбер-в-филиале,
     # услуга-в-филиале, барбер-предоставляет-услугу, лимит активных записей,
     # advisory-lock клиента, advisory-lock барбера, график, исключения,
-    # занятые слоты и два INSERT-а.
-    assert len(query_counter) <= 14, query_counter
+    # занятые слоты, advisory-lock лимита тарифа (Phase 6), подписка+тариф
+    # (лимит не задан на этом тарифе — usage не считается) и два INSERT-а.
+    assert len(query_counter) <= 16, query_counter
     # Оба напоминания создаются одним INSERT-ом вместе с записью.
     assert len(inserts) == 2, inserts
 

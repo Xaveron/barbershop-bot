@@ -11,14 +11,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.billing_ui import describe_billing_error
 from app.bot.keyboards.admin import back_to_admin_kb, clients_kb, export_periods_kb
 from app.bot.keyboards.callbacks import AdmCB
 from app.bot.middlewares.permissions import RequirePermission
 from app.bot.utils import alert, edit_message
 from app.config import Settings
-from app.database.models import Permission, StaffMember
+from app.database.models import Feature, Permission, StaffMember
 from app.database.repositories import UserRepository
 from app.services.authorization import AuthorizationError, AuthorizationService
+from app.services.billing import EntitlementService, FeatureNotAvailable
 from app.services.export import ExportService
 from app.services.stats import StatsService
 from app.utils.dt import now_utc
@@ -40,8 +42,14 @@ async def show_stats(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
+    lang: str,
 ) -> None:
     await state.clear()
+    try:
+        await EntitlementService(session, tenant_id).require_feature(Feature.ANALYTICS)
+    except FeatureNotAvailable as exc:
+        await alert(callback, describe_billing_error(exc, lang))
+        return
     stats = await StatsService(session, settings, tenant_id).collect()
     lines = [
         "📊 <b>Статистика</b>\n",
@@ -117,6 +125,7 @@ async def export_csv(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    lang: str,
 ) -> None:
     # Доп. проверка сверх VIEW_ANALYTICS на уровне роутера: массовая выгрузка
     # имён/телефонов клиентов в CSV чувствительнее просмотра сводки в чате —
@@ -129,6 +138,11 @@ async def export_csv(
         )
     except AuthorizationError:
         await alert(callback, "Недостаточно прав для экспорта.")
+        return
+    try:
+        await EntitlementService(session, tenant_id).require_feature(Feature.CSV_EXPORT)
+    except FeatureNotAvailable as exc:
+        await alert(callback, describe_billing_error(exc, lang))
         return
 
     now = now_utc()

@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.billing_ui import describe_billing_error
 from app.bot.keyboards.admin import admin_branch_kb, admin_branches_kb, back_to_admin_kb
 from app.bot.keyboards.callbacks import AdmCB
 from app.bot.middlewares.permissions import RequirePermission
@@ -17,6 +18,8 @@ from app.bot.states import AdminBranchSG, AdminFieldSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.database.models import Branch, Permission
 from app.database.repositories import BranchRepository
+from app.services.billing import BillingError
+from app.services.provisioning import BranchProvisioningService
 from app.utils.text import esc
 from app.utils.validators import ValidationError, validate_description, validate_name
 
@@ -101,7 +104,7 @@ async def add_branch_name(message: Message, state: FSMContext) -> None:
 
 @router.message(AdminBranchSG.address)
 async def add_branch_address(
-    message: Message, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
+    message: Message, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID, lang: str
 ) -> None:
     try:
         address = validate_description(message.text or "")
@@ -111,10 +114,14 @@ async def add_branch_address(
     data = await state.get_data()
     await state.clear()
     try:
-        branch = await BranchRepository(session, tenant_id).create(
+        branch = await BranchProvisioningService(session, tenant_id).create_branch(
             name=data["name"], address=address
         )
         await session.commit()
+    except BillingError as exc:
+        await session.rollback()
+        await message.answer(f"⚠️ {describe_billing_error(exc, lang)}")
+        return
     except Exception:
         await session.rollback()
         logger.exception("Не удалось создать филиал")

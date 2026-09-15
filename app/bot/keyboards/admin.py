@@ -35,7 +35,10 @@ def _back(action: str, arg: str = "") -> InlineKeyboardButton:
 
 
 def admin_menu_kb(
-    *, can_manage_branches: bool = False, can_view_staff: bool = False
+    *,
+    can_manage_branches: bool = False,
+    can_view_staff: bool = False,
+    can_manage_subscription: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💇 Услуги", callback_data=AdmCB(action="services"))
@@ -50,6 +53,8 @@ def admin_menu_kb(
         builder.button(text="📍 Филиалы", callback_data=AdmCB(action="branches"))
     if can_view_staff:
         builder.button(text="🧑‍💼 Сотрудники", callback_data=AdmCB(action="staff"))
+    if can_manage_subscription:
+        builder.button(text="💳 Тариф", callback_data=AdmCB(action="billing"))
     builder.button(text="⬅️ В меню", callback_data=NavCB(to="main"))
     builder.adjust(2, 2, 2, 2, 1, 1, 1)
     return builder.as_markup()

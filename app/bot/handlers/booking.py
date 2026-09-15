@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.bot.billing_ui import describe_billing_error
 from app.bot.i18n import t
 from app.bot.keyboards.callbacks import (
     BarberCB,
@@ -44,6 +45,7 @@ from app.database.repositories import (
     ServiceRepository,
     UserRepository,
 )
+from app.services.billing import BillingError
 from app.services.booking import BookingError, BookingService
 from app.services.formatting import summary_block
 from app.services.notifications import NotificationService
@@ -495,6 +497,14 @@ async def confirm_booking(
         )
         await alert(callback, t(exc.key, lang, **exc.params))
         await render_days(callback, state, session, settings, tenant_id, lang)
+        return
+    except BillingError as exc:
+        # Лимит тарифа арендатора — не проблема конкретного слота, повторный
+        # выбор дня/времени её не решит, поэтому (в отличие от BookingError
+        # выше) не возвращаем к выбору дня, а к самому началу записи.
+        await state.clear()
+        await alert(callback, describe_billing_error(exc, lang))
+        await render_branch_or_skip(callback, state, session, tenant_id, lang)
         return
 
     summary = _summary_text(service, barber, start_local, lang)

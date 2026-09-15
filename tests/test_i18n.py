@@ -79,7 +79,15 @@ def test_html_tags_are_balanced(lang):
 
 
 # Аббревиатуры, которые намеренно совпадают во всех языках.
-SHARED_KEYS = {"btn.faq"}
+SHARED_KEYS = {
+    "btn.faq",
+    # Чистые шаблоны форматирования (плейсхолдеры/эмодзи, без прозы) —
+    # намеренно одинаковы во всех языках, как и btn.faq.
+    "billing.limit_line",
+    "billing.limit_line_unlimited",
+    "billing.feature_line_on",
+    "billing.feature_line_off",
+}
 
 
 def test_translations_differ_between_languages():

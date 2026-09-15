@@ -13,8 +13,9 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import AuditLogEntry, Role, StaffMember
+from app.database.models import AuditLogEntry, LimitKey, Role, StaffMember
 from app.database.repositories import StaffRepository
+from app.services.billing import LimitService
 
 
 class StaffService:
@@ -22,6 +23,7 @@ class StaffService:
         self.session = session
         self.tenant_id = tenant_id
         self.staff = StaffRepository(session, tenant_id)
+        self.limits = LimitService(session, tenant_id)
 
     async def create_staff(
         self,
@@ -31,6 +33,7 @@ class StaffService:
         role: Role,
         barber_id: uuid.UUID | None = None,
     ) -> StaffMember | None:
+        await self.limits.assert_can_create(LimitKey.MAX_STAFF)
         staff = await self.staff.create(telegram_id=telegram_id, role=role, barber_id=barber_id)
         if staff is None:
             await self.session.rollback()
