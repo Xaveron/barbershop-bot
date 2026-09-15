@@ -13,6 +13,8 @@ from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
 from aiogram.types import Chat, Message
 from aiogram.types import User as TgUser
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.bot.middlewares import TextLimitMiddleware
 
@@ -93,3 +95,45 @@ async def mocked_bot():
     bot.mocked_session = session
     yield bot
     await bot.session.close()
+
+
+# --- Общий Dispatcher для сквозных тестов (test_handlers_flow.py,
+# test_integration_bot_identity.py) --------------------------------------------
+# Session-scoped и намеренно ОДИН на весь прогон: маршруты aiogram
+# (app/bot/handlers/*.py::router) — модульные синглтоны, попытка второй раз
+# включить их в новый корневой роутер падает с RuntimeError ("Router is
+# already attached"). Phase 7 сделал это безопасным: Dispatcher больше не
+# привязан ни к одному tenant_id на этапе сборки — арендатор резолвится
+# заново на каждый feed_update через BotIdentityMiddleware, так что общий
+# Dispatcher между файлами с разными сценариями/арендаторами корректен.
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+FLOW_ADMIN_ID = 990_001
+
+
+@pytest.fixture(scope="session")
+def flow_settings():
+    from app.config import Settings
+
+    return Settings(
+        BOT_TOKEN="123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+        DATABASE_URL=TEST_DATABASE_URL or "postgresql+asyncpg://x:x@localhost/x",
+        ADMIN_ID=str(FLOW_ADMIN_ID),
+        TIMEZONE="Europe/Chisinau",
+        THROTTLE_INTERVAL=0.0,
+        THROTTLE_BURST=100,
+    )
+
+
+@pytest.fixture(scope="session")
+def flow_session_factory(flow_settings):
+    from app.database import build_session_factory
+
+    engine = create_async_engine(flow_settings.database_url, poolclass=NullPool)
+    return build_session_factory(engine)
+
+
+@pytest.fixture(scope="session")
+def flow_dispatcher(flow_settings, flow_session_factory):
+    from app.main import build_dispatcher
+
+    return build_dispatcher(flow_settings, flow_session_factory)

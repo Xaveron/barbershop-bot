@@ -25,6 +25,10 @@ class Settings(BaseSettings):
 
     # --- Обязательные -------------------------------------------------------
     bot_token: SecretStr = Field(validation_alias="BOT_TOKEN", min_length=20)
+    # Доп. токены для процесса, обслуживающего несколько ботов (Phase 7) —
+    # через запятую, как ADMIN_ID. Основной BOT_TOKEN остаётся обязательным:
+    # однобот-развёртывание не требует никаких изменений конфигурации.
+    bot_tokens: SecretStr = Field(default=SecretStr(""), validation_alias="BOT_TOKENS")
     database_url: str = Field(validation_alias="DATABASE_URL", min_length=10)
     admin_id: str = Field(default="", validation_alias="ADMIN_ID")
     timezone: str = Field(default="Europe/Chisinau", validation_alias="TIMEZONE")
@@ -128,6 +132,16 @@ class Settings(BaseSettings):
         """ADMIN_ID может содержать несколько id через запятую/точку с запятой."""
         raw = self.admin_id.replace(";", ",").replace(" ", ",")
         return tuple(int(chunk) for chunk in raw.split(",") if chunk.strip().isdigit())
+
+    @property
+    def bot_tokens_all(self) -> tuple[str, ...]:
+        """BOT_TOKEN + необязательные дополнительные из BOT_TOKENS, без дублей."""
+        extra = [
+            chunk.strip()
+            for chunk in self.bot_tokens.get_secret_value().split(",")
+            if chunk.strip()
+        ]
+        return tuple(dict.fromkeys([self.bot_token.get_secret_value(), *extra]))
 
     @property
     def tz(self) -> ZoneInfo:

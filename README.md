@@ -64,9 +64,18 @@ SEED_ON_START=true
 | `DEFAULT_LANGUAGE` | `ru` | Язык по умолчанию: `ru`, `ro` или `en` |
 | `DEFAULT_CURRENCY` | `MDL` | Валюта новых услуг |
 
-Необязательные (значения по умолчанию — в `.env.example`): `LOG_LEVEL`, `SQL_ECHO`, `SLOT_STEP_MINUTES`, `BOOKING_HORIZON_DAYS`, `MIN_LEAD_MINUTES`, `CANCEL_MIN_LEAD_MINUTES`, `MAX_ACTIVE_APPOINTMENTS`, `REQUIRE_PHONE`, `THROTTLE_INTERVAL`, `THROTTLE_BURST`, `SEED_ON_START`, `SHOP_NAME`, `SHOP_ADDRESS`, `SHOP_PHONE`, `SHOP_MAPS_URL`.
+Необязательные (значения по умолчанию — в `.env.example`): `LOG_LEVEL`, `SQL_ECHO`, `SLOT_STEP_MINUTES`, `BOOKING_HORIZON_DAYS`, `MIN_LEAD_MINUTES`, `CANCEL_MIN_LEAD_MINUTES`, `MAX_ACTIVE_APPOINTMENTS`, `REQUIRE_PHONE`, `THROTTLE_INTERVAL`, `THROTTLE_BURST`, `SEED_ON_START`, `SHOP_NAME`, `SHOP_ADDRESS`, `SHOP_PHONE`, `SHOP_MAPS_URL`, `BOT_TOKENS`.
 
 Секреты хранятся только в `.env` — файл в `.gitignore`, а логи маскируют токены и пароли в DSN.
+
+Процесс умеет обслуживать несколько ботов одновременно — каждый бот принадлежит своему
+арендатору, а не наоборот (см. `docs/BOT_IDENTITY_ARCHITECTURE.md`). `BOT_TOKEN` остаётся токеном
+основного бота; дополнительные боты перечисляются через запятую в `BOT_TOKENS`. Токен сам по себе
+не привязывает бота к арендатору — после того как токен настроен, привяжите бота к арендатору:
+
+```bash
+python -m app.register_bot --tenant-id <uuid>
+```
 
 ## 3. Запуск без Docker
 

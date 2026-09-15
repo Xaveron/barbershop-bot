@@ -1,4 +1,9 @@
-"""Точка входа: инициализация бота, БД, планировщика и graceful shutdown."""
+"""Точка входа: инициализация ботов, БД, планировщика и graceful shutdown.
+
+Phase 7: процесс может обслуживать несколько Telegram-ботов одновременно —
+каждый bot принадлежит своему арендатору (app/database/models/bot_identity.py),
+разрешаемому заново на каждый апдейт (app/bot/middlewares/bot_identity.py), а
+не один раз при старте процесса."""
 
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ import uuid
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.session.base import BaseSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
@@ -20,6 +26,7 @@ from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefaul
 
 from app.bot.handlers import build_router
 from app.bot.middlewares import (
+    BotIdentityMiddleware,
     DatabaseMiddleware,
     PrivateChatOnlyMiddleware,
     StaffContextMiddleware,
@@ -29,8 +36,8 @@ from app.bot.middlewares import (
 )
 from app.config import Settings, get_settings
 from app.database import build_engine, build_session_factory, wait_for_database
-from app.database.tenants import resolve_default_tenant_id
 from app.scheduler import build_scheduler
+from app.services.bot_identity import BotIdentityResolver
 from app.utils.logging import mask_secrets, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -60,15 +67,16 @@ def _build_storage(settings: Settings) -> MemoryStorage | RedisStorage:
     return MemoryStorage()
 
 
-def build_dispatcher(settings: Settings, session_factory, tenant_id: uuid.UUID) -> Dispatcher:
+def build_dispatcher(settings: Settings, session_factory) -> Dispatcher:
+    """Больше не принимает tenant_id: арендатор разрешается per-update
+    BotIdentityMiddleware, а не один раз здесь (см. модуль-докстринг)."""
     dispatcher = Dispatcher(storage=_build_storage(settings))
     dispatcher["settings"] = settings
     dispatcher["session_factory"] = session_factory
-    dispatcher["tenant_id"] = tenant_id
 
-    # Порядок важен: троттлинг → только личные чаты → сессия БД → пользователь.
-    # Троттлинг стоит первым, чтобы флуд командами в группы (см. PrivateChatOnlyMiddleware)
-    # тоже расходовал лимит отправителя, а не отвечал безлимитно в обход антифлуда.
+    # Порядок важен: троттлинг → только личные чаты → сессия БД → bot identity
+    # (нужна data["session"] от DatabaseMiddleware) → пользователь (уже читает
+    # data["tenant_id"], который выставляет BotIdentityMiddleware) → персонал.
     dispatcher.update.outer_middleware(
         ThrottlingMiddleware(
             interval=settings.throttle_interval,
@@ -78,11 +86,71 @@ def build_dispatcher(settings: Settings, session_factory, tenant_id: uuid.UUID) 
     )
     dispatcher.update.outer_middleware(PrivateChatOnlyMiddleware(settings.default_language))
     dispatcher.update.outer_middleware(DatabaseMiddleware(session_factory))
+    dispatcher.update.outer_middleware(BotIdentityMiddleware())
     dispatcher.update.outer_middleware(UserContextMiddleware(settings))
     dispatcher.update.outer_middleware(StaffContextMiddleware(settings))
 
     dispatcher.include_router(build_router())
     return dispatcher
+
+
+def _build_bot(token: str, session: BaseSession | None) -> Bot:
+    bot = Bot(
+        token=token,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    # Страховка от лимитов Telegram на длину текста — на всех исходящих запросах.
+    bot.session.middleware(TextLimitMiddleware())
+    return bot
+
+
+async def _validate_bots(bots: list[Bot], settings: Settings) -> list[Bot]:
+    """Проверяет каждый bot независимо: невалидный токен исключает только
+    этот bot (его арендатор останется без обслуживания), а не весь процесс —
+    один сломанный bot не должен положить остальных арендаторов."""
+    validated: list[Bot] = []
+    for bot in bots:
+        try:
+            me = await bot.get_me()
+        except TelegramUnauthorizedError:
+            logger.error(
+                "Telegram отклонил токен bot_id=%s. Проверьте BOT_TOKEN/BOT_TOKENS", bot.id
+            )
+            continue
+        except TelegramNetworkError as error:
+            logger.error("Telegram API недоступен для bot_id=%s: %s", bot.id, error)
+            continue
+        logger.info("Бот запущен: @%s (id=%s)", me.username, bot.id)
+        await setup_commands(bot, settings)
+        validated.append(bot)
+    return validated
+
+
+async def _resolve_bots_by_tenant(
+    bots: list[Bot], session_factory
+) -> dict[uuid.UUID, Bot]:
+    """Один bot на арендатора для планировщика: если у арендатора несколько
+    активных identity, побеждает та, что зарегистрирована раньше остальных —
+    не влияет на ответные сообщения (они всегда идут через тот bot, которому
+    реально написал клиент), только на то, через какой bot планировщик шлёт
+    напоминания этому арендатору (см. docs/BOT_IDENTITY_ARCHITECTURE.md)."""
+    earliest: dict[uuid.UUID, tuple] = {}
+    async with session_factory() as session:
+        resolver = BotIdentityResolver(session)
+        for bot in bots:
+            identity = await resolver.resolve(bot.id)
+            if identity is None or not identity.is_active:
+                logger.warning(
+                    "bot_id=%s не привязан к активному арендатору — "
+                    "напоминания для него не будут запланированы",
+                    bot.id,
+                )
+                continue
+            existing = earliest.get(identity.tenant_id)
+            if existing is None or identity.created_at < existing[0]:
+                earliest[identity.tenant_id] = (identity.created_at, bot)
+    return {tenant_id: bot for tenant_id, (_created_at, bot) in earliest.items()}
 
 
 async def run() -> None:
@@ -102,24 +170,15 @@ async def run() -> None:
         logger.error("Не удалось подключиться к базе данных: %s", mask_secrets(str(exc)))
         return
 
-    tenant_id = await resolve_default_tenant_id(session_factory, settings)
-
-    session = None
+    api_session: BaseSession | None = None
     if settings.telegram_api_base:
         logger.info("Используется локальный Bot API server: %s", settings.telegram_api_base)
-        session = AiohttpSession(
+        api_session = AiohttpSession(
             api=TelegramAPIServer.from_base(settings.telegram_api_base.rstrip("/"))
         )
 
-    bot = Bot(
-        token=settings.bot_token.get_secret_value(),
-        session=session,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-    # Страховка от лимитов Telegram на длину текста — на всех исходящих запросах.
-    bot.session.middleware(TextLimitMiddleware())
-    dispatcher = build_dispatcher(settings, session_factory, tenant_id)
-    scheduler = build_scheduler(bot, session_factory, settings, tenant_id)
+    bots = [_build_bot(token, api_session) for token in settings.bot_tokens_all]
+    dispatcher = build_dispatcher(settings, session_factory)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -127,24 +186,25 @@ async def run() -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop_event.set)
 
+    scheduler = None
     try:
-        try:
-            me = await bot.get_me()
-        except TelegramUnauthorizedError:
-            logger.error("Telegram отклонил токен. Проверьте BOT_TOKEN в .env")
+        validated_bots = await _validate_bots(bots, settings)
+        if not validated_bots:
+            logger.error("Ни один bot не прошёл проверку токена — нечего обслуживать")
             return
-        except TelegramNetworkError as error:
-            logger.error("Telegram API недоступен: %s", error)
-            return
-        logger.info("Бот запущен: @%s", me.username)
-        await setup_commands(bot, settings)
-        # Сбрасываем возможный вебхук, иначе long polling не получит апдейты.
-        await bot.delete_webhook(drop_pending_updates=False)
+
+        bots_by_tenant = await _resolve_bots_by_tenant(validated_bots, session_factory)
+        scheduler = build_scheduler(bots_by_tenant, session_factory, settings)
+
+        # Сбрасываем возможный вебхук на каждом боте, иначе long polling
+        # не получит апдейты.
+        for bot in validated_bots:
+            await bot.delete_webhook(drop_pending_updates=False)
         scheduler.start()
 
         polling = asyncio.create_task(
             dispatcher.start_polling(
-                bot,
+                *validated_bots,
                 allowed_updates=dispatcher.resolve_used_update_types(),
                 handle_signals=False,
             ),
@@ -164,10 +224,13 @@ async def run() -> None:
                 await polling
     finally:
         logger.info("Graceful shutdown...")
-        if scheduler.running:
+        if scheduler is not None and scheduler.running:
             scheduler.shutdown(wait=False)
         await dispatcher.storage.close()
-        await bot.session.close()
+        # dict.fromkeys, а не просто цикл по bots: с локальным Bot API server
+        # все боты делят одну AiohttpSession, closing её дважды — лишний вызов.
+        for session in dict.fromkeys(bot.session for bot in bots):
+            await session.close()
         await engine.dispose()
         logger.info("Остановлено")
 

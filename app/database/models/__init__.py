@@ -10,6 +10,7 @@ from app.database.models.billing import (
     Subscription,
     SubscriptionStatus,
 )
+from app.database.models.bot_identity import TelegramBotIdentity
 from app.database.models.branch import BarberBranch, Branch, BranchService, StaffBranch
 from app.database.models.notification import Notification, NotificationKind, NotificationStatus
 from app.database.models.schedule import ScheduleException, WorkingSchedule
@@ -45,6 +46,7 @@ __all__ = [
     "StaffMember",
     "Subscription",
     "SubscriptionStatus",
+    "TelegramBotIdentity",
     "Tenant",
     "TenantStatus",
     "User",

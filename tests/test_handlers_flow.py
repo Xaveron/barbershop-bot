@@ -16,12 +16,9 @@ import pytest
 from aiogram.types import CallbackQuery, Chat, Message, Update
 from aiogram.types import User as TgUser
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.pool import NullPool
 
 from app.bot.i18n import t
 from app.config import Settings
-from app.database import build_session_factory
 from app.database.models import (
     Appointment,
     AppointmentStatus,
@@ -29,12 +26,12 @@ from app.database.models import (
     BarberBranch,
     Branch,
     Service,
+    TelegramBotIdentity,
     Tenant,
     TenantStatus,
     User,
     WorkingSchedule,
 )
-from app.main import build_dispatcher
 from app.utils.dt import now_utc
 from app.utils.text import TELEGRAM_TEXT_LIMIT
 
@@ -50,23 +47,17 @@ STRANGER_ID = 990_003
 
 
 @pytest.fixture(scope="module")
-def settings() -> Settings:
-    return Settings(
-        BOT_TOKEN="123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
-        DATABASE_URL=TEST_DATABASE_URL or "postgresql+asyncpg://x:x@localhost/x",
-        ADMIN_ID=str(ADMIN_ID),
-        TIMEZONE="Europe/Chisinau",
-        # Троттлинг не должен мешать быстрым тестовым апдейтам.
-        THROTTLE_INTERVAL=0.0,
-        THROTTLE_BURST=100,
-    )
+def settings(flow_settings: Settings) -> Settings:
+    """Алиас на session-scoped tests/conftest.py::flow_settings (ADMIN_ID
+    здесь совпадает с ADMIN_ID этого модуля, см. flow_settings)."""
+    return flow_settings
 
 
 @pytest.fixture(scope="module")
-def session_factory(settings: Settings):
-    """NullPool: у каждого теста свой event loop, соединения не переиспользуются."""
-    engine = create_async_engine(settings.database_url, poolclass=NullPool)
-    return build_session_factory(engine)
+def session_factory(flow_session_factory):
+    """Алиас на session-scoped tests/conftest.py::flow_session_factory —
+    общий Dispatcher (см. dispatcher ниже) должен смотреть в ту же БД."""
+    return flow_session_factory
 
 
 @pytest.fixture(scope="module")
@@ -88,10 +79,30 @@ async def tenant_id(session_factory):
         await session.commit()
 
 
+MOCKED_BOT_ID = 123456789  # см. tests/conftest.py::mocked_bot — id, разобранный из токена
+
+
 @pytest.fixture(scope="module")
-def dispatcher(settings, session_factory, tenant_id):
-    """Хендлер-роутеры aiogram — модульные синглтоны: Dispatcher создаём один раз."""
-    return build_dispatcher(settings, session_factory, tenant_id)
+async def bot_identity(session_factory, tenant_id):
+    """Phase 7: tenant_id больше не передаётся в build_dispatcher напрямую —
+    BotIdentityMiddleware резолвит его через эту строку по bot.id мока."""
+    async with session_factory() as session:
+        session.add(
+            TelegramBotIdentity(
+                tenant_id=tenant_id, telegram_bot_id=MOCKED_BOT_ID, username="test_bot"
+            )
+        )
+        await session.commit()
+
+
+@pytest.fixture(scope="module")
+def dispatcher(flow_dispatcher, tenant_id, bot_identity):
+    """Алиас на session-scoped tests/conftest.py::flow_dispatcher (см. её
+    докстринг: роутеры aiogram — модульные синглтоны, второй build_dispatcher()
+    в процессе падает с RuntimeError, поэтому Dispatcher общий на весь прогон).
+    tenant_id/bot_identity — зависимости по факту: гарантируют, что нужная
+    строка TelegramBotIdentity уже есть в БД до первого feed_update."""
+    return flow_dispatcher
 
 
 @pytest.fixture
