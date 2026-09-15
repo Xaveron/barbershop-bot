@@ -63,10 +63,7 @@ async def _send(
         await target.answer(text, reply_markup=markup)
 
 
-def _require_manage_tenant(
-    settings: Settings, staff: StaffMember | None, telegram_id: int | None
-) -> None:
-    is_super_admin = telegram_id is not None and settings.is_admin(telegram_id)
+def _require_manage_tenant(staff: StaffMember | None, is_super_admin: bool) -> None:
     AuthorizationService.require(staff, Permission.MANAGE_TENANT, is_super_admin=is_super_admin)
 
 
@@ -105,12 +102,11 @@ async def continue_onboarding(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
     lang: str,
 ) -> None:
     try:
-        _require_manage_tenant(
-            settings, staff, callback.from_user.id if callback.from_user else None
-        )
+        _require_manage_tenant(staff, is_super_admin)
     except AuthorizationError:
         await callback.answer(t("common.no_rights", lang), show_alert=True)
         return
@@ -387,12 +383,11 @@ async def activate_tenant(
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
     is_admin: bool,
+    is_super_admin: bool,
     lang: str,
 ) -> None:
     try:
-        _require_manage_tenant(
-            settings, staff, callback.from_user.id if callback.from_user else None
-        )
+        _require_manage_tenant(staff, is_super_admin)
     except AuthorizationError:
         await callback.answer(t("common.no_rights", lang), show_alert=True)
         return

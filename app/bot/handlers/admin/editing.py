@@ -16,7 +16,6 @@ from app.bot.handlers.admin.branches import branch_card
 from app.bot.handlers.admin.services import service_card
 from app.bot.states import AdminFieldSG
 from app.bot.utils import parse_uuid
-from app.config import Settings
 from app.database.models import Permission, StaffMember
 from app.database.repositories import BarberRepository, BranchRepository, ServiceRepository
 from app.services.authorization import AuthorizationError, AuthorizationService
@@ -39,8 +38,8 @@ async def apply_field_edit(
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
-    settings: Settings,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     data = await state.get_data()
     entity = data.get("entity")
@@ -63,7 +62,6 @@ async def apply_field_edit(
         "barber": Permission.MANAGE_STAFF,
         "branch": Permission.MANAGE_BRANCHES,
     }[entity]
-    is_super_admin = bool(message.from_user and settings.is_admin(message.from_user.id))
     try:
         AuthorizationService.require(staff, permission, is_super_admin=is_super_admin)
     except AuthorizationError:

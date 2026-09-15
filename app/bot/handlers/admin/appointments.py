@@ -44,10 +44,8 @@ PAGE_SIZE = 8
 
 
 async def _accessible_branch_ids(
-    callback: CallbackQuery, session: AsyncSession, settings: Settings,
-    tenant_id: uuid.UUID, staff: StaffMember | None,
+    session: AsyncSession, tenant_id: uuid.UUID, staff: StaffMember | None, is_super_admin: bool,
 ) -> frozenset[uuid.UUID] | None:
-    is_super_admin = bool(callback.from_user and settings.is_admin(callback.from_user.id))
     return await resolve_accessible_branch_ids(
         session, tenant_id, staff, is_super_admin=is_super_admin
     )
@@ -62,12 +60,13 @@ async def show_appointments(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     await state.clear()
     page = int(callback_data.arg) if callback_data.arg.isdigit() else 0
     now = now_utc()
     horizon = now + timedelta(days=365)
-    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branch_ids = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     repository = AppointmentRepository(session, tenant_id)
     total = await repository.count_between(
         start=now, end=horizon, statuses=(AppointmentStatus.CONFIRMED,), branch_ids=branch_ids
@@ -102,6 +101,7 @@ async def show_appointment(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     await state.clear()
     appointment_id = parse_uuid(callback_data.arg)
@@ -113,7 +113,7 @@ async def show_appointment(
     if appointment is None:
         await alert(callback, "Запись не найдена.")
         return
-    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branch_ids = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     if branch_ids is not None and appointment.branch_id not in branch_ids:
         await alert(callback, "Недостаточно прав.")
         return
@@ -136,6 +136,7 @@ async def cancel_appointment(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -147,7 +148,7 @@ async def cancel_appointment(
     if target is None:
         await alert(callback, "Запись не найдена.")
         return
-    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branch_ids = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     if branch_ids is not None and target.branch_id not in branch_ids:
         await alert(callback, "Недостаточно прав.")
         return
@@ -187,6 +188,7 @@ async def mark_no_show(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     """Клиент не пришёл: запись закрывается, напоминания снимаются."""
     appointment_id = parse_uuid(callback_data.arg)
@@ -197,7 +199,7 @@ async def mark_no_show(
     if target is None:
         await alert(callback, "Запись не найдена.")
         return
-    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branch_ids = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     if branch_ids is not None and target.branch_id not in branch_ids:
         await alert(callback, "Недостаточно прав.")
         return
@@ -227,6 +229,7 @@ async def move_appointment(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     appointment_id = parse_uuid(callback_data.arg)
     appointment = (
@@ -237,7 +240,7 @@ async def move_appointment(
     if appointment is None:
         await alert(callback, "Запись не найдена.")
         return
-    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branch_ids = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     if branch_ids is not None and appointment.branch_id not in branch_ids:
         await alert(callback, "Недостаточно прав.")
         return
@@ -262,10 +265,11 @@ async def show_bulk_cancel_days(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     await state.clear()
     now = now_utc()
-    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branch_ids = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     appointments = await AppointmentRepository(session, tenant_id).list_between(
         start=now,
         end=now + timedelta(days=30),
@@ -300,6 +304,7 @@ async def confirm_bulk_cancel(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     try:
         selected_date = date.fromisoformat(callback_data.arg)
@@ -312,7 +317,7 @@ async def confirm_bulk_cancel(
     # выборка/отмена ниже уже фильтруется по доступным сотруднику филиалам.
     day_start = combine_local(selected_date, datetime.min.time(), settings.tz)
     day_end = day_start + timedelta(days=1)
-    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branch_ids = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     count = await AppointmentRepository(session, tenant_id).count_between(
         start=day_start, end=day_end, statuses=(AppointmentStatus.CONFIRMED,),
         branch_ids=branch_ids,
@@ -341,6 +346,7 @@ async def execute_bulk_cancel(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
     bot: Bot,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -353,7 +359,7 @@ async def execute_bulk_cancel(
     day_start = combine_local(selected_date, datetime.min.time(), settings.tz)
     day_end = day_start + timedelta(days=1)
 
-    branch_ids = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    branch_ids = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     repository = AppointmentRepository(session, tenant_id)
     notifications_repo = NotificationRepository(session)
     appointments = await repository.list_between(

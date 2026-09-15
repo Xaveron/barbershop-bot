@@ -30,12 +30,15 @@ class UserContextMiddleware(BaseMiddleware):
     ) -> Any:
         telegram_user: TelegramUser | None = data.get("event_from_user")
         session: AsyncSession | None = data.get("session")
-        tenant_id = data["tenant_id"]
+        # Апдейт от платформенного бота (Phase 8) не резолвит tenant_id —
+        # для него ниже по цепочке нет ни User, ни StaffMember, только
+        # платформенная авторизация (см. StaffContextMiddleware).
+        tenant_id = data.get("tenant_id")
 
         data["settings"] = self.settings
-        data["is_admin"] = bool(
-            telegram_user is not None and self.settings.is_admin(telegram_user.id)
-        )
+        # Финальное значение — за StaffContextMiddleware (учитывает staff и
+        # платформенного оператора); здесь только безопасный дефолт.
+        data["is_admin"] = False
         # Язык до обращения к БД — он нужен даже там, где пользователя нет
         # (групповые чаты, троттлинг, ошибки).
         data["lang"] = normalize_language(
@@ -43,7 +46,12 @@ class UserContextMiddleware(BaseMiddleware):
             self.settings.default_language,
         )
 
-        if telegram_user is not None and not telegram_user.is_bot and session is not None:
+        if (
+            telegram_user is not None
+            and not telegram_user.is_bot
+            and session is not None
+            and tenant_id is not None
+        ):
             repository = UserRepository(session, tenant_id)
             user = await repository.get_or_create(
                 telegram_id=telegram_user.id,

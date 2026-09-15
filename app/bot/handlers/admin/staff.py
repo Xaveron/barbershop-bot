@@ -19,7 +19,6 @@ from app.bot.keyboards.admin import ROLE_LABELS, admin_staff_card_kb, admin_staf
 from app.bot.keyboards.callbacks import AdmCB
 from app.bot.middlewares.permissions import RequirePermission
 from app.bot.utils import alert, edit_message, parse_uuid
-from app.config import Settings
 from app.database.models import Permission, Role, StaffMember
 from app.database.repositories import BranchRepository, StaffRepository
 from app.services.authorization import AuthorizationError, AuthorizationService
@@ -97,11 +96,10 @@ async def toggle_staff_branch(
     callback_data: AdmCB,
     state: FSMContext,
     session: AsyncSession,
-    settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
-    is_super_admin = bool(callback.from_user and settings.is_admin(callback.from_user.id))
     try:
         AuthorizationService.require(staff, Permission.MANAGE_STAFF, is_super_admin=is_super_admin)
     except AuthorizationError:

@@ -18,3 +18,11 @@ class TenantRepository(BaseRepository):
 
     async def get(self, tenant_id: uuid.UUID) -> Tenant | None:
         return await self.session.get(Tenant, tenant_id)
+
+    async def list_all(self) -> list[Tenant]:
+        """Платформенный обзор (Phase 8) — все арендаторы, не один tenant_id."""
+        stmt = select(Tenant).order_by(Tenant.created_at)
+        return list(await self.session.scalars(stmt))
+
+    async def slug_exists(self, slug: str) -> bool:
+        return await self.session.scalar(select(Tenant.id).where(Tenant.slug == slug)) is not None

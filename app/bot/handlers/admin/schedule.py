@@ -43,10 +43,8 @@ EXCEPTIONS_HORIZON_DAYS = 180
 
 
 async def _accessible_branch_ids(
-    callback: CallbackQuery, session: AsyncSession, settings: Settings,
-    tenant_id: uuid.UUID, staff: StaffMember | None,
+    session: AsyncSession, tenant_id: uuid.UUID, staff: StaffMember | None, is_super_admin: bool,
 ) -> frozenset[uuid.UUID] | None:
-    is_super_admin = bool(callback.from_user and settings.is_admin(callback.from_user.id))
     return await resolve_accessible_branch_ids(
         session, tenant_id, staff, is_super_admin=is_super_admin
     )
@@ -87,6 +85,7 @@ async def _enter_barber_schedule(
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
     barber_id: uuid.UUID,
+    is_super_admin: bool,
 ) -> None:
     """Общая точка входа после выбора барбера: резолвит его филиалы,
     сужает до доступных сотруднику, авто-выбирает единственный (без нового
@@ -98,7 +97,7 @@ async def _enter_barber_schedule(
     await state.update_data(barber_id=str(barber.id))
 
     branches = await BranchRepository(session, tenant_id).list_for_barber(barber.id)
-    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    accessible = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     candidates = _restrict(branches, accessible)
     if not candidates:
         await alert(callback, "Нет доступных вам филиалов для этого барбера.")
@@ -123,13 +122,16 @@ async def show_week(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     await state.clear()
     barber_id = parse_uuid(callback_data.arg)
     if barber_id is None:
         await alert(callback, "Барбер не найден.")
         return
-    await _enter_barber_schedule(callback, state, session, settings, tenant_id, staff, barber_id)
+    await _enter_barber_schedule(
+        callback, state, session, settings, tenant_id, staff, barber_id, is_super_admin
+    )
     await callback.answer()
 
 
@@ -142,6 +144,7 @@ async def pick_branch_for_schedule(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     data = await state.get_data()
     barber_id = parse_uuid(data.get("barber_id", ""))
@@ -150,7 +153,7 @@ async def pick_branch_for_schedule(
         await alert(callback, "Сессия устарела. Откройте /admin заново.")
         return
     branch = await BranchRepository(session, tenant_id).get_active(branch_id)
-    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    accessible = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     if (
         branch is None
         or not await BranchRepository(session, tenant_id).barber_works_at_branch(
@@ -332,10 +335,11 @@ async def show_exceptions(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     await state.clear()
     today = today_in(settings.tz)
-    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    accessible = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     branches = _restrict(await BranchRepository(session, tenant_id).list_active(), accessible)
     exceptions: list = []
     branch_names: dict[uuid.UUID, str] = {}
@@ -402,6 +406,7 @@ async def add_exception_pick_date(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     scope = callback_data.arg
     barber_id = None if scope == "all" else parse_uuid(scope)
@@ -410,7 +415,7 @@ async def add_exception_pick_date(
         return
     await state.update_data(scope=scope)
 
-    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    accessible = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     if barber_id is None:
         candidates = _restrict(await BranchRepository(session, tenant_id).list_active(), accessible)
     else:
@@ -443,6 +448,7 @@ async def pick_branch_for_exception(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     data = await state.get_data()
     scope = data.get("scope")
@@ -451,7 +457,7 @@ async def pick_branch_for_exception(
         await alert(callback, "Сессия устарела. Откройте /admin заново.")
         return
     branch = await BranchRepository(session, tenant_id).get_active(branch_id)
-    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    accessible = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     if branch is None or (accessible is not None and branch_id not in accessible):
         await alert(callback, "Недостаточно прав или филиал недоступен.")
         return
@@ -556,6 +562,7 @@ async def delete_exception(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
 ) -> None:
     exception_id = parse_uuid(callback_data.arg)
     repository = ScheduleRepository(session, tenant_id)
@@ -563,7 +570,7 @@ async def delete_exception(
     if exception is None:
         await alert(callback, "Исключение не найдено.")
         return
-    accessible = await _accessible_branch_ids(callback, session, settings, tenant_id, staff)
+    accessible = await _accessible_branch_ids(session, tenant_id, staff, is_super_admin)
     if accessible is not None and exception.branch_id not in accessible:
         await alert(callback, "Недостаточно прав.")
         return

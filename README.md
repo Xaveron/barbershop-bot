@@ -64,7 +64,7 @@ SEED_ON_START=true
 | `DEFAULT_LANGUAGE` | `ru` | Язык по умолчанию: `ru`, `ro` или `en` |
 | `DEFAULT_CURRENCY` | `MDL` | Валюта новых услуг |
 
-Необязательные (значения по умолчанию — в `.env.example`): `LOG_LEVEL`, `SQL_ECHO`, `SLOT_STEP_MINUTES`, `BOOKING_HORIZON_DAYS`, `MIN_LEAD_MINUTES`, `CANCEL_MIN_LEAD_MINUTES`, `MAX_ACTIVE_APPOINTMENTS`, `REQUIRE_PHONE`, `THROTTLE_INTERVAL`, `THROTTLE_BURST`, `SEED_ON_START`, `SHOP_NAME`, `SHOP_ADDRESS`, `SHOP_PHONE`, `SHOP_MAPS_URL`, `BOT_TOKENS`.
+Необязательные (значения по умолчанию — в `.env.example`): `LOG_LEVEL`, `SQL_ECHO`, `SLOT_STEP_MINUTES`, `BOOKING_HORIZON_DAYS`, `MIN_LEAD_MINUTES`, `CANCEL_MIN_LEAD_MINUTES`, `MAX_ACTIVE_APPOINTMENTS`, `REQUIRE_PHONE`, `THROTTLE_INTERVAL`, `THROTTLE_BURST`, `SEED_ON_START`, `SHOP_NAME`, `SHOP_ADDRESS`, `SHOP_PHONE`, `SHOP_MAPS_URL`, `BOT_TOKENS`, `PLATFORM_BOT_TOKEN`.
 
 Секреты хранятся только в `.env` — файл в `.gitignore`, а логи маскируют токены и пароли в DSN.
 
@@ -76,6 +76,11 @@ SEED_ON_START=true
 ```bash
 python -m app.register_bot --tenant-id <uuid>
 ```
+
+Отдельно от арендаторских ботов есть необязательный `PLATFORM_BOT_TOKEN` — выделенный бот
+платформенной админки (`/platform`: список/создание/активация/приостановка арендаторов,
+привязка/деактивация ботов). Если не задан — живой `/platform` просто недоступен, платформенные
+операции остаются доступны через сервисный слой и CLI. Подробнее — `docs/PLATFORM_CONTROL_PLANE.md`.
 
 ## 3. Запуск без Docker
 
@@ -110,6 +115,17 @@ alembic current                               # текущая ревизия
 
 Проверка прав выполняется фильтром на уровне админ-роутера, поэтому все админ-хендлеры и кнопки закрыты для остальных пользователей.
 
+`ADMIN_ID` — это только точка входа для *первого* платформенного оператора, не постоянный способ
+авторизации (см. `docs/PLATFORM_CONTROL_PLANE.md`). Чтобы перевести доступ на управляемую БД
+таблицу платформенных операторов:
+
+```bash
+python -m app.bootstrap_platform_admin
+```
+
+Идемпотентно — создаёт `PlatformOperator` для каждого id из `ADMIN_ID`, если его ещё нет. После
+этого `ADMIN_ID` для платформенной авторизации больше не используется.
+
 ## 6. Тесты
 
 ```bash
@@ -138,6 +154,8 @@ pytest                 # 214 тестов
 | `tests/test_i18n.py` | полнота словарей, совпадение плейсхолдеров, коды языков, локализация дат |
 | `tests/test_integration_booking.py` | PostgreSQL: гонки, IDOR, лимиты, горизонт, идемпотентность напоминаний, число SQL-запросов |
 | `tests/test_handlers_flow.py` | сквозные сценарии через `Dispatcher`: запись, двойное нажатие, группы, права, три языка |
+| `tests/test_integration_bot_identity.py` | резолюция арендатора по Telegram-боту, изоляция между ботами, провижининг |
+| `tests/test_integration_platform.py` | платформенный control plane: операторы, жизненный цикл арендатора, провижининг ботов, поддельные callback'и |
 
 ## 7. Прогон без настоящего Telegram
 

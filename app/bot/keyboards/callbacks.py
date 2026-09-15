@@ -62,3 +62,13 @@ class AdmDayCB(CallbackData, prefix="aw"):
 
 class OnbCB(CallbackData, prefix="ob"):
     action: str  # welcome | skip_tz | skip_currency | activate | ...
+
+
+class PlatformCB(CallbackData, prefix="pf"):
+    """Только выделенный платформенный бот (data["is_platform_bot"]) когда-либо
+    доходит до роутера, который читает эти callback — но arg всё равно
+    сервер-сайд валидируется на каждый апдейт (см. docs/PLATFORM_CONTROL_PLANE.md
+    §Callback security): arg НИКОГДА не доверяется напрямую."""
+
+    action: str  # menu | tenants | tenant | create | activate | suspend | bots | bot_toggle
+    arg: str = ""

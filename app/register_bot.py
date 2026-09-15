@@ -26,7 +26,8 @@ from aiogram.exceptions import TelegramUnauthorizedError
 
 from app.config import get_settings
 from app.database import build_engine, build_session_factory, wait_for_database
-from app.database.repositories import TelegramBotIdentityRepository, TenantRepository
+from app.database.repositories import TenantRepository
+from app.services.bot_identity import BotAlreadyAssignedError, BotProvisioningService
 from app.utils.logging import mask_secrets, setup_logging
 
 logger = logging.getLogger(__name__)
@@ -66,27 +67,25 @@ async def register_bot(tenant_id: uuid.UUID) -> int:
                 logger.error("Арендатор %s не найден", tenant_id)
                 return 1
 
-            repository = TelegramBotIdentityRepository(session)
-            existing = await repository.get_by_bot_id(me.id)
-            if existing is not None:
-                if existing.tenant_id == tenant_id:
-                    logger.info(
-                        "bot_id=%s (@%s) уже зарегистрирован за арендатором %s — ничего не делаем",
-                        me.id, me.username, tenant_id,
-                    )
-                    return 0
+            try:
+                _identity, created = await BotProvisioningService(session).attach(
+                    tenant_id=tenant_id, telegram_bot_id=me.id, username=me.username
+                )
+            except BotAlreadyAssignedError:
                 logger.error(
-                    "bot_id=%s (@%s) уже зарегистрирован за ДРУГИМ арендатором (%s) — "
+                    "bot_id=%s (@%s) уже зарегистрирован за ДРУГИМ арендатором — "
                     "отказ, чтобы случайно не переподключить бота. Уберите старую "
                     "привязку вручную, если это осознанное решение.",
-                    me.id, me.username, existing.tenant_id,
+                    me.id, me.username,
                 )
                 return 1
-
-            await repository.create(
-                tenant_id=tenant_id, telegram_bot_id=me.id, username=me.username
-            )
             await session.commit()
+            if not created:
+                logger.info(
+                    "bot_id=%s (@%s) уже зарегистрирован за арендатором %s — ничего не делаем",
+                    me.id, me.username, tenant_id,
+                )
+                return 0
             logger.info(
                 "Зарегистрирован bot_id=%s (@%s) за арендатором %s (%s)",
                 me.id, me.username, tenant_id, tenant.name,

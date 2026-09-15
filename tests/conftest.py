@@ -98,7 +98,7 @@ async def mocked_bot():
 
 
 # --- Общий Dispatcher для сквозных тестов (test_handlers_flow.py,
-# test_integration_bot_identity.py) --------------------------------------------
+# test_integration_bot_identity.py, test_integration_platform.py) --------------
 # Session-scoped и намеренно ОДИН на весь прогон: маршруты aiogram
 # (app/bot/handlers/*.py::router) — модульные синглтоны, попытка второй раз
 # включить их в новый корневой роутер падает с RuntimeError ("Router is
@@ -108,6 +108,10 @@ async def mocked_bot():
 # Dispatcher между файлами с разными сценариями/арендаторами корректен.
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 FLOW_ADMIN_ID = 990_001
+# Phase 8: id "выделенного" платформенного бота, зафиксированный на этапе
+# сборки shared-диспетчера — любой Bot с этим id в тестах становится
+# платформенным для BotIdentityMiddleware, не только для одного файла.
+FLOW_PLATFORM_BOT_ID = 995_000_001
 
 
 @pytest.fixture(scope="session")
@@ -125,15 +129,21 @@ def flow_settings():
 
 
 @pytest.fixture(scope="session")
-def flow_session_factory(flow_settings):
+def flow_engine(flow_settings):
+    return create_async_engine(flow_settings.database_url, poolclass=NullPool)
+
+
+@pytest.fixture(scope="session")
+def flow_session_factory(flow_engine):
     from app.database import build_session_factory
 
-    engine = create_async_engine(flow_settings.database_url, poolclass=NullPool)
-    return build_session_factory(engine)
+    return build_session_factory(flow_engine)
 
 
 @pytest.fixture(scope="session")
 def flow_dispatcher(flow_settings, flow_session_factory):
     from app.main import build_dispatcher
 
-    return build_dispatcher(flow_settings, flow_session_factory)
+    return build_dispatcher(
+        flow_settings, flow_session_factory, platform_bot_id=FLOW_PLATFORM_BOT_ID
+    )

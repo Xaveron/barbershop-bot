@@ -67,9 +67,13 @@ def _build_storage(settings: Settings) -> MemoryStorage | RedisStorage:
     return MemoryStorage()
 
 
-def build_dispatcher(settings: Settings, session_factory) -> Dispatcher:
+def build_dispatcher(
+    settings: Settings, session_factory, *, platform_bot_id: int | None = None
+) -> Dispatcher:
     """Больше не принимает tenant_id: арендатор разрешается per-update
-    BotIdentityMiddleware, а не один раз здесь (см. модуль-докстринг)."""
+    BotIdentityMiddleware, а не один раз здесь (см. модуль-докстринг).
+    platform_bot_id (Phase 8) — id выделенного бота платформенной админки,
+    если он сконфигурирован (см. build_router/app/bot/handlers/platform)."""
     dispatcher = Dispatcher(storage=_build_storage(settings))
     dispatcher["settings"] = settings
     dispatcher["session_factory"] = session_factory
@@ -86,7 +90,7 @@ def build_dispatcher(settings: Settings, session_factory) -> Dispatcher:
     )
     dispatcher.update.outer_middleware(PrivateChatOnlyMiddleware(settings.default_language))
     dispatcher.update.outer_middleware(DatabaseMiddleware(session_factory))
-    dispatcher.update.outer_middleware(BotIdentityMiddleware())
+    dispatcher.update.outer_middleware(BotIdentityMiddleware(platform_bot_id=platform_bot_id))
     dispatcher.update.outer_middleware(UserContextMiddleware(settings))
     dispatcher.update.outer_middleware(StaffContextMiddleware(settings))
 
@@ -125,6 +129,25 @@ async def _validate_bots(bots: list[Bot], settings: Settings) -> list[Bot]:
         await setup_commands(bot, settings)
         validated.append(bot)
     return validated
+
+
+async def _validate_platform_bot(bot: Bot) -> Bot | None:
+    """Отдельно от _validate_bots: платформенный бот не арендаторский — не
+    получает USER_COMMANDS/ADMIN_COMMANDS, только /platform (Phase 8)."""
+    try:
+        me = await bot.get_me()
+    except TelegramUnauthorizedError:
+        logger.error("Telegram отклонил PLATFORM_BOT_TOKEN — платформенный бот отключён")
+        return None
+    except TelegramNetworkError as error:
+        logger.error("Telegram API недоступен для платформенного бота: %s", error)
+        return None
+    logger.info("Платформенный бот запущен: @%s (id=%s)", me.username, bot.id)
+    with contextlib.suppress(Exception):
+        await bot.set_my_commands(
+            [BotCommand(command="platform", description="Платформенная админка")]
+        )
+    return bot
 
 
 async def _resolve_bots_by_tenant(
@@ -177,8 +200,18 @@ async def run() -> None:
             api=TelegramAPIServer.from_base(settings.telegram_api_base.rstrip("/"))
         )
 
-    bots = [_build_bot(token, api_session) for token in settings.bot_tokens_all]
-    dispatcher = build_dispatcher(settings, session_factory)
+    tenant_bots = [_build_bot(token, api_session) for token in settings.bot_tokens_all]
+    platform_bot: Bot | None = None
+    platform_token = settings.platform_bot_token.get_secret_value()
+    if platform_token:
+        platform_bot = _build_bot(platform_token, api_session)
+    else:
+        logger.info("PLATFORM_BOT_TOKEN не задан — живой /platform недоступен")
+    all_bots = [*tenant_bots, *([platform_bot] if platform_bot else [])]
+
+    dispatcher = build_dispatcher(
+        settings, session_factory, platform_bot_id=platform_bot.id if platform_bot else None
+    )
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -188,23 +221,29 @@ async def run() -> None:
 
     scheduler = None
     try:
-        validated_bots = await _validate_bots(bots, settings)
-        if not validated_bots:
+        validated_tenant_bots = await _validate_bots(tenant_bots, settings)
+        validated_platform_bot = (
+            await _validate_platform_bot(platform_bot) if platform_bot is not None else None
+        )
+        polling_bots = [
+            *validated_tenant_bots, *([validated_platform_bot] if validated_platform_bot else [])
+        ]
+        if not polling_bots:
             logger.error("Ни один bot не прошёл проверку токена — нечего обслуживать")
             return
 
-        bots_by_tenant = await _resolve_bots_by_tenant(validated_bots, session_factory)
+        bots_by_tenant = await _resolve_bots_by_tenant(validated_tenant_bots, session_factory)
         scheduler = build_scheduler(bots_by_tenant, session_factory, settings)
 
         # Сбрасываем возможный вебхук на каждом боте, иначе long polling
         # не получит апдейты.
-        for bot in validated_bots:
+        for bot in polling_bots:
             await bot.delete_webhook(drop_pending_updates=False)
         scheduler.start()
 
         polling = asyncio.create_task(
             dispatcher.start_polling(
-                *validated_bots,
+                *polling_bots,
                 allowed_updates=dispatcher.resolve_used_update_types(),
                 handle_signals=False,
             ),
@@ -229,7 +268,7 @@ async def run() -> None:
         await dispatcher.storage.close()
         # dict.fromkeys, а не просто цикл по bots: с локальным Bot API server
         # все боты делят одну AiohttpSession, closing её дважды — лишний вызов.
-        for session in dict.fromkeys(bot.session for bot in bots):
+        for session in dict.fromkeys(bot.session for bot in all_bots):
             await session.close()
         await engine.dispose()
         logger.info("Остановлено")

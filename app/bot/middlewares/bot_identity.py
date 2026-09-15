@@ -6,7 +6,13 @@ process-global tenant_id, который раньше выставлялся о�
 процесса в dispatcher["tenant_id"] (aiogram workflow data — одинаков для
 каждого апдейта вне зависимости от бота). Никакого fallback на дефолтного
 арендатора: неизвестный или отключённый bot не должен доходить до хендлеров
-(см. docs/BOT_IDENTITY_ARCHITECTURE.md)."""
+(см. docs/BOT_IDENTITY_ARCHITECTURE.md).
+
+Phase 8: выделенный платформенный бот (settings.platform_bot_token) —
+единственное исключение из резолюции через TelegramBotIdentity. Он не
+принадлежит ни одному арендатору: для него data["tenant_id"] остаётся None,
+а data["is_platform_bot"] = True — обычный tenant-бот НЕ может "стать"
+платформенным (см. docs/PLATFORM_CONTROL_PLANE.md §Platform bot vs tenant bot)."""
 
 from __future__ import annotations
 
@@ -24,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 class BotIdentityMiddleware(BaseMiddleware):
+    def __init__(self, platform_bot_id: int | None = None) -> None:
+        self.platform_bot_id = platform_bot_id
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
@@ -31,8 +40,14 @@ class BotIdentityMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         bot: Bot = data["bot"]
-        session: AsyncSession = data["session"]
 
+        if self.platform_bot_id is not None and bot.id == self.platform_bot_id:
+            data["is_platform_bot"] = True
+            data["tenant_id"] = None
+            return await handler(event, data)
+
+        data["is_platform_bot"] = False
+        session: AsyncSession = data["session"]
         identity = await BotIdentityResolver(session).resolve(bot.id)
         if identity is None:
             logger.warning("Апдейт от неизвестного bot_id=%s отклонён", bot.id)

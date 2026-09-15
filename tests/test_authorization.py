@@ -9,19 +9,9 @@ from aiogram.types import CallbackQuery, Chat, Message
 from aiogram.types import User as TgUser
 
 from app.bot.middlewares.permissions import IsStaff, RequirePermission
-from app.config import Settings
 from app.database.models import ROLE_PERMISSIONS, Permission, Role, StaffMember
 from app.services.authorization import AuthorizationError, AuthorizationService
 from tests.conftest import local
-
-
-def make_settings(admin_id: str = "") -> Settings:
-    return Settings(
-        BOT_TOKEN="123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
-        DATABASE_URL="postgresql+asyncpg://u:p@localhost:5432/db",
-        ADMIN_ID=admin_id,
-        TIMEZONE="Europe/Chisinau",
-    )
 
 
 def make_staff(role: Role, *, is_active: bool = True, barber_id: uuid.UUID | None = None) -> StaffMember:
@@ -162,59 +152,55 @@ def test_inactive_barber_loses_own_resource_access():
 
 
 # --- IsStaff / RequirePermission (фильтры на реальных Telegram-объектах) -----
+# Phase 8: оба фильтра больше не читают Settings/ADMIN_ID сами — is_super_admin
+# приходит DI-инъекцией (см. app/bot/middlewares/staff.py, вычисляется через
+# PlatformAuthorizationService). Здесь передаём его напрямую, как и любой
+# другой параметр из data.
 async def test_is_staff_allows_platform_super_admin():
-    settings = make_settings(admin_id="111111")
-    assert await IsStaff()(make_message(111111), settings=settings, staff=None)
+    assert await IsStaff()(make_message(111111), is_super_admin=True, staff=None)
 
 
 async def test_is_staff_allows_active_tenant_staff():
-    settings = make_settings(admin_id="")
     staff = make_staff(Role.RECEPTIONIST)
-    assert await IsStaff()(make_message(999999), settings=settings, staff=staff)
+    assert await IsStaff()(make_message(999999), is_super_admin=False, staff=staff)
 
 
 async def test_is_staff_denies_inactive_staff():
-    settings = make_settings(admin_id="")
     staff = make_staff(Role.RECEPTIONIST, is_active=False)
-    assert not await IsStaff()(make_message(999999), settings=settings, staff=staff)
+    assert not await IsStaff()(make_message(999999), is_super_admin=False, staff=staff)
 
 
 async def test_is_staff_denies_stranger():
-    settings = make_settings(admin_id="")
-    assert not await IsStaff()(make_message(999999), settings=settings, staff=None)
+    assert not await IsStaff()(make_message(999999), is_super_admin=False, staff=None)
 
 
 async def test_require_permission_ignores_is_admin_display_flag():
     """Регрессия: is_admin в data — это только флаг показа кнопки, а не
     источник авторизации. RequirePermission обязан смотреть исключительно на
-    settings.is_admin(...) и на реальный staff, а не на этот флаг."""
-    settings = make_settings(admin_id="")
+    is_super_admin и на реальный staff, а не на этот флаг."""
     filter_ = RequirePermission(Permission.MANAGE_STAFF)
     # `is_admin=True` нарочно НЕ передаётся фильтру — у него нет такого
-    # параметра. Проверяем, что без settings.is_admin(...) и без staff отказ
+    # параметра. Проверяем, что без is_super_admin и без staff отказ
     # происходит независимо от того, что где-то в data мог быть True.
-    assert not await filter_(make_callback(999999), settings=settings, staff=None)
+    assert not await filter_(make_callback(999999), is_super_admin=False, staff=None)
 
 
 async def test_require_permission_allows_super_admin_for_any_permission():
-    settings = make_settings(admin_id="111111")
     for permission in Permission:
         assert await RequirePermission(permission)(
-            make_callback(111111), settings=settings, staff=None
+            make_callback(111111), is_super_admin=True, staff=None
         )
 
 
 async def test_require_permission_denies_role_without_that_permission():
-    settings = make_settings(admin_id="")
     staff = make_staff(Role.RECEPTIONIST)
     assert not await RequirePermission(Permission.MANAGE_STAFF)(
-        make_callback(999999), settings=settings, staff=staff
+        make_callback(999999), is_super_admin=False, staff=staff
     )
 
 
 async def test_require_permission_allows_role_with_that_permission():
-    settings = make_settings(admin_id="")
     staff = make_staff(Role.RECEPTIONIST)
     assert await RequirePermission(Permission.MANAGE_BOOKINGS)(
-        make_callback(999999), settings=settings, staff=staff
+        make_callback(999999), is_super_admin=False, staff=staff
     )

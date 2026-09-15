@@ -125,13 +125,13 @@ async def export_csv(
     settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
     lang: str,
 ) -> None:
     # Доп. проверка сверх VIEW_ANALYTICS на уровне роутера: массовая выгрузка
     # имён/телефонов клиентов в CSV чувствительнее просмотра сводки в чате —
     # роль с одним VIEW_ANALYTICS (например MANAGER) не должна автоматически
     # получать право на выгрузку персональных данных (см. docs/RBAC_DESIGN.md §5).
-    is_super_admin = bool(callback.from_user and settings.is_admin(callback.from_user.id))
     try:
         AuthorizationService.require(
             staff, Permission.MANAGE_CUSTOMERS, is_super_admin=is_super_admin

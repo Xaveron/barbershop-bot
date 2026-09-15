@@ -2,10 +2,10 @@
 
 Гейтится MANAGE_SUBSCRIPTION (Phase 2, уже выдан только TENANT_OWNER) — ничего
 нового не изобретается. Нет кнопки оплаты и нет смены тарифа для владельца.
-Платформенный SUPER_ADMIN (ADMIN_ID) дополнительно видит минимальный
+Платформенный оператор (Phase 8, data["is_super_admin"] — см.
+app/services/platform_authorization.py) дополнительно видит минимальный
 dev-инструмент смены тарифа арендатора — это не подменяет и не расширяет
-MANAGE_SUBSCRIPTION, а отдельная, явно обособленная проверка is_admin, как и
-везде в проекте (см. app/bot/middlewares/permissions.py::_is_super_admin)."""
+MANAGE_SUBSCRIPTION, а отдельная, явно обособленная проверка."""
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from app.bot.i18n import t
 from app.bot.keyboards.callbacks import AdmCB
 from app.bot.middlewares.permissions import RequirePermission
 from app.bot.utils import alert, edit_message
-from app.config import Settings
 from app.database.models import Feature, LimitKey, Permission
 from app.database.repositories import PlanRepository
 from app.services.billing import LimitService, SubscriptionService
@@ -80,19 +79,14 @@ async def _billing_kb(
     return builder.as_markup()
 
 
-def _is_super_admin(callback: CallbackQuery, settings: Settings) -> bool:
-    return bool(callback.from_user and settings.is_admin(callback.from_user.id))
-
-
 @router.callback_query(AdmCB.filter(F.action == "billing"))
 async def show_billing(
     callback: CallbackQuery,
     session: AsyncSession,
     tenant_id: uuid.UUID,
     lang: str,
-    settings: Settings,
+    is_super_admin: bool,
 ) -> None:
-    is_super_admin = _is_super_admin(callback, settings)
     text = await _render_billing_text(session, tenant_id, lang)
     markup = await _billing_kb(session, is_super_admin=is_super_admin, lang=lang)
     await edit_message(callback, text, markup)
@@ -106,9 +100,8 @@ async def dev_change_plan(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     lang: str,
-    settings: Settings,
+    is_super_admin: bool,
 ) -> None:
-    is_super_admin = _is_super_admin(callback, settings)
     if not is_super_admin or callback.from_user is None:
         await alert(callback, t("common.no_rights", lang))
         return

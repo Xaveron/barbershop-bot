@@ -37,13 +37,16 @@ async def cmd_start(
     settings: Settings,
     staff: StaffMember | None,
     is_admin: bool,
+    is_super_admin: bool,
     lang: str,
 ) -> None:
     await state.clear()
 
     tenant = await TenantRepository(session).get(tenant_id)
     if tenant is not None and tenant.status != TenantStatus.ACTIVE:
-        await _handle_inactive_tenant(message, state, session, settings, tenant_id, staff, lang)
+        await _handle_inactive_tenant(
+            message, state, session, tenant_id, staff, is_super_admin, lang
+        )
         return
 
     await message.answer(
@@ -61,19 +64,20 @@ async def _handle_inactive_tenant(
     message: Message,
     state: FSMContext,
     session: AsyncSession,
-    settings: Settings,
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
+    is_super_admin: bool,
     lang: str,
 ) -> None:
     """Арендатор ещё не ACTIVE (онбординг/приостановлен): обычным клиентам —
     нейтральное сообщение без меню и без входа в запись (см.
     docs/TENANT_ONBOARDING_DESIGN.md §7), владельцу/админу арендатора —
-    мастер онбординга. ADMIN_ID пользователь, если у арендатора ещё нет ни
-    одного сотрудника, становится TENANT_OWNER здесь же — единственный
-    временный мост через платформенный ADMIN_ID (см. §4)."""
+    мастер онбординга. Платформенный оператор (Phase 8,
+    data["is_super_admin"] — см. app/services/platform_authorization.py),
+    если у арендатора ещё нет ни одного сотрудника, становится TENANT_OWNER
+    здесь же — единственный временный мост через платформенную идентичность
+    (см. docs/PLATFORM_CONTROL_PLANE.md)."""
     telegram_id = message.from_user.id if message.from_user else None
-    is_super_admin = telegram_id is not None and settings.is_admin(telegram_id)
     can_manage_tenant = AuthorizationService.has_permission(
         staff, Permission.MANAGE_TENANT, is_super_admin=is_super_admin
     )

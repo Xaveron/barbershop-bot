@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     # через запятую, как ADMIN_ID. Основной BOT_TOKEN остаётся обязательным:
     # однобот-развёртывание не требует никаких изменений конфигурации.
     bot_tokens: SecretStr = Field(default=SecretStr(""), validation_alias="BOT_TOKENS")
+    # Выделенный бот платформенной админки (Phase 8, /platform) — НЕ бот
+    # арендатора, никогда не резолвит tenant_id (см.
+    # docs/PLATFORM_CONTROL_PLANE.md). Не задан — живого /platform просто нет,
+    # control plane всё равно доступен через CLI/сервисный слой.
+    platform_bot_token: SecretStr = Field(
+        default=SecretStr(""), validation_alias="PLATFORM_BOT_TOKEN"
+    )
     database_url: str = Field(validation_alias="DATABASE_URL", min_length=10)
     admin_id: str = Field(default="", validation_alias="ADMIN_ID")
     timezone: str = Field(default="Europe/Chisinau", validation_alias="TIMEZONE")

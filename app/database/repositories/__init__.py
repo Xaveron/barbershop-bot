@@ -5,6 +5,7 @@ from app.database.repositories.bot_identity import TelegramBotIdentityRepository
 from app.database.repositories.branch import BranchRepository
 from app.database.repositories.notification import NotificationRepository
 from app.database.repositories.plan import PlanRepository
+from app.database.repositories.platform_operator import PlatformOperatorRepository
 from app.database.repositories.schedule import ScheduleRepository
 from app.database.repositories.service import ServiceRepository
 from app.database.repositories.staff import StaffRepository
@@ -19,6 +20,7 @@ __all__ = [
     "BranchRepository",
     "NotificationRepository",
     "PlanRepository",
+    "PlatformOperatorRepository",
     "ScheduleRepository",
     "ServiceRepository",
     "StaffRepository",

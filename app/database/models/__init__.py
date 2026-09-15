@@ -13,6 +13,7 @@ from app.database.models.billing import (
 from app.database.models.bot_identity import TelegramBotIdentity
 from app.database.models.branch import BarberBranch, Branch, BranchService, StaffBranch
 from app.database.models.notification import Notification, NotificationKind, NotificationStatus
+from app.database.models.platform import PlatformOperator, PlatformRole
 from app.database.models.schedule import ScheduleException, WorkingSchedule
 from app.database.models.service import Service
 from app.database.models.staff import ROLE_PERMISSIONS, Permission, Role, StaffMember
@@ -39,6 +40,8 @@ __all__ = [
     "Plan",
     "PlanFeature",
     "PlanLimit",
+    "PlatformOperator",
+    "PlatformRole",
     "Role",
     "ScheduleException",
     "Service",
