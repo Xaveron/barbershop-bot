@@ -30,6 +30,24 @@ class StaffRepository(TenantScopedRepository):
         )
         return list(await self.session.scalars(stmt))
 
+    async def has_any_staff(self) -> bool:
+        """Используется онбордингом: пока у арендатора нет вообще ни одного
+        сотрудника, /start от ADMIN_ID вправе стать TENANT_OWNER (см.
+        docs/TENANT_ONBOARDING_DESIGN.md) — после первой строки этот путь
+        больше никогда не срабатывает."""
+        stmt = select(func.count()).select_from(StaffMember).where(
+            StaffMember.tenant_id == self.tenant_id
+        )
+        return bool(await self.session.scalar(stmt))
+
+    async def get_owner(self) -> StaffMember | None:
+        stmt = select(StaffMember).where(
+            StaffMember.tenant_id == self.tenant_id,
+            StaffMember.role == Role.TENANT_OWNER,
+            StaffMember.is_active.is_(True),
+        )
+        return await self.session.scalar(stmt)
+
     async def create(
         self, *, telegram_id: int, role: Role, barber_id: uuid.UUID | None = None
     ) -> StaffMember | None:

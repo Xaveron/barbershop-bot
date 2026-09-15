@@ -50,16 +50,25 @@ class BranchRepository(TenantScopedRepository):
         address: str | None = None,
         phone: str | None = None,
         timezone: str | None = None,
+        currency: str | None = None,
     ) -> Branch:
-        """timezone по умолчанию наследуется от арендатора, а не от жёстко
-        зашитого дефолта колонки — иначе филиал в арендаторе с нестандартным
-        часовым поясом молча получил бы неверную зону (см.
-        docs/STAFF_SERVICE_BRANCH_DESIGN.md)."""
-        if timezone is None:
+        """timezone/currency по умолчанию наследуются от арендатора, а не от
+        жёстко зашитых дефолтов колонок — иначе филиал в арендаторе с
+        нестандартными зоной/валютой молча получил бы неверные значения (см.
+        docs/STAFF_SERVICE_BRANCH_DESIGN.md, docs/TENANT_ONBOARDING_DESIGN.md)."""
+        if timezone is None or currency is None:
             tenant = await TenantRepository(self.session).get(self.tenant_id)
-            timezone = tenant.timezone if tenant is not None else "Europe/Chisinau"
+            if timezone is None:
+                timezone = tenant.timezone if tenant is not None else "Europe/Chisinau"
+            if currency is None:
+                currency = tenant.currency if tenant is not None else "MDL"
         branch = Branch(
-            tenant_id=self.tenant_id, name=name, address=address, phone=phone, timezone=timezone
+            tenant_id=self.tenant_id,
+            name=name,
+            address=address,
+            phone=phone,
+            timezone=timezone,
+            currency=currency,
         )
         self.session.add(branch)
         await self.session.flush()

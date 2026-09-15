@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram import Router
 
-from app.bot.handlers import appointments, booking, common, errors, fallback, info
+from app.bot.handlers import appointments, booking, common, errors, fallback, info, onboarding
 from app.bot.handlers.admin import build_admin_router
 
 
@@ -11,6 +11,7 @@ def build_router() -> Router:
     router = Router(name="root")
     router.include_router(errors.router)
     router.include_router(common.router)
+    router.include_router(onboarding.router)
     router.include_router(build_admin_router())
     router.include_router(booking.router)
     router.include_router(appointments.router)

@@ -188,4 +188,58 @@ MESSAGES: dict[str, str] = {
     "error.barber_locked": (
         "Someone is booking this barber right now. Please try again in a minute."
     ),
+    # --- Tenant onboarding ----------------------------------------------------
+    "onboarding.not_active_customer": (
+        "🚧 This barbershop is still being set up and isn't taking bookings yet. "
+        "Please check back soon!"
+    ),
+    "onboarding.owner_claimed": "👋 You've been set as the owner of this barbershop.",
+    "onboarding.welcome": (
+        "🏪 <b>Barbershop setup</b>\n\n"
+        "Let's set up your barbershop in a few steps: location, services, barbers, "
+        "and working hours. Progress is saved — you can continue anytime."
+    ),
+    "onboarding.step_business_name": "Step 1. What's your barbershop called?",
+    "onboarding.step_branch_name": "Step 2. Name of your first location (e.g. \"Downtown\").",
+    "onboarding.step_branch_timezone": (
+        "Location timezone — an IANA identifier, e.g. Europe/Chisinau or "
+        "Europe/Bucharest.\n\nCurrent default: {default}. Send your own value or "
+        "\"-\" to keep this one."
+    ),
+    "onboarding.step_branch_currency": (
+        "Location currency — a three-letter code, e.g. MDL, RON or EUR.\n\n"
+        "Default: {default}. Send your own code or \"-\" to keep this one."
+    ),
+    "onboarding.step_service_name": "Step 3. Name of your first service (e.g. \"Haircut\").",
+    "onboarding.step_service_duration": "Service duration in minutes, e.g.: 45",
+    "onboarding.step_service_price": "Service price, e.g.: 250",
+    "onboarding.step_barber_name": "Step 4. Name of your first barber.",
+    "onboarding.step_schedule_hours": (
+        "Step 5. This barber's working hours for every day of the week, "
+        "in the format 10:00-19:00."
+    ),
+    "onboarding.invalid_timezone": (
+        "Invalid timezone. Please use an IANA identifier, e.g. Europe/Chisinau."
+    ),
+    "onboarding.invalid_currency": "Invalid currency. A three-letter code, e.g. MDL.",
+    "onboarding.invalid_name": "Name is too short or too long (2-120 characters).",
+    "onboarding.invalid_duration": "Duration is a whole number of minutes, 5-480, a multiple of 5.",
+    "onboarding.invalid_price": "Price is a number, e.g.: 250 or 250.50",
+    "onboarding.invalid_hours": "Working hours format: 10:00-19:00",
+    "onboarding.review_title": "📋 <b>Review before launch</b>",
+    "onboarding.review_ready": "✅ Everything's ready! You can launch your barbershop.",
+    "onboarding.review_not_ready": "Not ready to launch yet:",
+    "onboarding.missing_branch": "— no active location yet",
+    "onboarding.missing_service": "— no active service yet",
+    "onboarding.missing_barber": "— no barber assigned to a location yet",
+    "onboarding.missing_schedule": "— this barber has no working hours set",
+    "onboarding.btn_activate": "🚀 Launch barbershop",
+    "onboarding.btn_continue": "➡️ Continue setup",
+    "onboarding.activated": (
+        "🎉 Your barbershop is live! Customers can now book, and the full admin "
+        "panel is available to you (/admin)."
+    ),
+    "onboarding.activation_blocked": (
+        "Can't launch yet — finish setup first (see the list above)."
+    ),
 }

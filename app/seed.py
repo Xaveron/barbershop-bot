@@ -78,7 +78,7 @@ async def seed() -> None:
         logger.error("Не удалось подключиться к базе данных: %s", mask_secrets(str(exc)))
         return
 
-    tenant_id = await resolve_default_tenant_id(session_factory)
+    tenant_id = await resolve_default_tenant_id(session_factory, settings)
 
     async with session_factory() as session:
         for payload in DEFAULT_SERVICES:

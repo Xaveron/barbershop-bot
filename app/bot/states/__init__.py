@@ -7,6 +7,7 @@ from app.bot.states.admin import (
     AdminServiceSG,
 )
 from app.bot.states.booking import BookingSG, RescheduleSG
+from app.bot.states.onboarding import OnboardingSG
 
 __all__ = [
     "AdminBarberSG",
@@ -16,5 +17,6 @@ __all__ = [
     "AdminScheduleSG",
     "AdminServiceSG",
     "BookingSG",
+    "OnboardingSG",
     "RescheduleSG",
 ]

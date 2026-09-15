@@ -6,7 +6,7 @@ from app.database.models.notification import Notification, NotificationKind, Not
 from app.database.models.schedule import ScheduleException, WorkingSchedule
 from app.database.models.service import Service
 from app.database.models.staff import ROLE_PERMISSIONS, Permission, Role, StaffMember
-from app.database.models.tenant import Tenant
+from app.database.models.tenant import Tenant, TenantStatus
 from app.database.models.user import User
 
 __all__ = [
@@ -30,6 +30,7 @@ __all__ = [
     "StaffBranch",
     "StaffMember",
     "Tenant",
+    "TenantStatus",
     "User",
     "WorkingSchedule",
 ]

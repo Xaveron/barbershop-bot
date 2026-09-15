@@ -189,4 +189,58 @@ MESSAGES: dict[str, str] = {
     "error.barber_locked": (
         "Cineva face chiar acum o programare la acest maestru. Încearcă peste un minut."
     ),
+    # --- Configurarea arendatorului ---------------------------------------------
+    "onboarding.not_active_customer": (
+        "🚧 Acest salon de frizerie este încă în curs de configurare și nu "
+        "acceptă programări deocamdată. Revino în curând!"
+    ),
+    "onboarding.owner_claimed": "👋 Ai fost desemnat proprietarul acestui salon.",
+    "onboarding.welcome": (
+        "🏪 <b>Configurare salon</b>\n\n"
+        "Hai să configurăm salonul tău în câțiva pași: locație, servicii, frizeri "
+        "și program de lucru. Progresul se salvează — poți continua oricând."
+    ),
+    "onboarding.step_business_name": "Pasul 1. Cum se numește salonul tău?",
+    "onboarding.step_branch_name": "Pasul 2. Numele primei locații (de ex. „Centru”).",
+    "onboarding.step_branch_timezone": (
+        "Fusul orar al locației — un identificator IANA, de ex. Europe/Chisinau "
+        "sau Europe/Bucharest.\n\nValoare implicită: {default}. Trimite propria "
+        "valoare sau „-” pentru a o păstra."
+    ),
+    "onboarding.step_branch_currency": (
+        "Moneda locației — un cod din trei litere, de ex. MDL, RON sau EUR.\n\n"
+        "Implicit: {default}. Trimite propriul cod sau „-” pentru a-l păstra."
+    ),
+    "onboarding.step_service_name": "Pasul 3. Numele primului serviciu (de ex. „Tuns”).",
+    "onboarding.step_service_duration": "Durata serviciului în minute, de ex.: 45",
+    "onboarding.step_service_price": "Prețul serviciului, de ex.: 250",
+    "onboarding.step_barber_name": "Pasul 4. Numele primului frizer.",
+    "onboarding.step_schedule_hours": (
+        "Pasul 5. Programul de lucru al frizerului pentru fiecare zi a "
+        "săptămânii, în formatul 10:00-19:00."
+    ),
+    "onboarding.invalid_timezone": (
+        "Fus orar invalid. Folosește un identificator IANA, de ex. Europe/Chisinau."
+    ),
+    "onboarding.invalid_currency": "Monedă invalidă. Un cod din trei litere, de ex. MDL.",
+    "onboarding.invalid_name": "Numele este prea scurt sau prea lung (2-120 caractere).",
+    "onboarding.invalid_duration": "Durata e un număr întreg de minute, 5-480, multiplu de 5.",
+    "onboarding.invalid_price": "Prețul se indică printr-un număr, de ex.: 250 sau 250.50",
+    "onboarding.invalid_hours": "Formatul orelor de lucru: 10:00-19:00",
+    "onboarding.review_title": "📋 <b>Verificare înainte de lansare</b>",
+    "onboarding.review_ready": "✅ Totul este gata! Poți lansa salonul.",
+    "onboarding.review_not_ready": "Încă nu ești gata de lansare:",
+    "onboarding.missing_branch": "— nicio locație activă",
+    "onboarding.missing_service": "— niciun serviciu activ",
+    "onboarding.missing_barber": "— niciun frizer asociat unei locații",
+    "onboarding.missing_schedule": "— acest frizer nu are program de lucru setat",
+    "onboarding.btn_activate": "🚀 Lansează salonul",
+    "onboarding.btn_continue": "➡️ Continuă configurarea",
+    "onboarding.activated": (
+        "🎉 Salonul tău este live! Clienții pot face programări, iar panoul "
+        "complet de administrare este disponibil (/admin)."
+    ),
+    "onboarding.activation_blocked": (
+        "Încă nu poți lansa — finalizează mai întâi configurarea (vezi lista de mai sus)."
+    ),
 }

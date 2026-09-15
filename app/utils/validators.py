@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 MAX_NAME_LENGTH = 120
 MAX_DESCRIPTION_LENGTH = 500
@@ -140,3 +141,28 @@ def validate_positive_int(value: str, *, field: str) -> int:
     if not _DIGITS_RE.fullmatch(raw) or int(raw) <= 0:
         raise ValidationError(f"{field} должно быть положительным целым числом.")
     return int(raw)
+
+
+def validate_timezone(value: str) -> str:
+    """IANA-идентификатор часового пояса, например Europe/Chisinau — та же
+    проверка, что Settings._validate_timezone, но как переиспользуемая
+    функция (см. docs/TENANT_ONBOARDING_DESIGN.md). Никаких смещений вида
+    UTC+2 — только настоящие зоны, иначе DST не будет учитываться."""
+    raw = clean_text(value, max_length=64)
+    try:
+        ZoneInfo(raw)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValidationError(
+            "Некорректный часовой пояс. Укажите IANA-идентификатор, "
+            "например Europe/Chisinau или Europe/Bucharest."
+        ) from exc
+    return raw
+
+
+def validate_currency(value: str) -> str:
+    """Трёхбуквенный код валюты (ISO 4217-стиль) — та же проверка, что
+    Settings._validate_currency."""
+    currency = clean_text(value, max_length=8).upper()
+    if len(currency) != 3 or not currency.isalpha():
+        raise ValidationError("Валюта — трёхбуквенный код, например MDL, RON или EUR.")
+    return currency

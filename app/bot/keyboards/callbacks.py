@@ -58,3 +58,7 @@ class AdmCB(CallbackData, prefix="ad"):
 class AdmDayCB(CallbackData, prefix="aw"):
     barber: str
     weekday: int
+
+
+class OnbCB(CallbackData, prefix="ob"):
+    action: str  # welcome | skip_tz | skip_currency | activate | ...

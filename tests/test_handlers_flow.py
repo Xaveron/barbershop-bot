@@ -30,6 +30,7 @@ from app.database.models import (
     Branch,
     Service,
     Tenant,
+    TenantStatus,
     User,
     WorkingSchedule,
 )
@@ -73,7 +74,9 @@ async def tenant_id(session_factory):
     """Отдельный арендатор на модуль — не пересекается с другими тестами/данными."""
     marker = uuid.uuid4().hex[:8]
     async with session_factory() as session:
-        tenant = Tenant(name=f"Flow Tenant {marker}", slug=f"flow-{marker}")
+        tenant = Tenant(
+            name=f"Flow Tenant {marker}", slug=f"flow-{marker}", status=TenantStatus.ACTIVE
+        )
         session.add(tenant)
         await session.commit()
         tid = tenant.id

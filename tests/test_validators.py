@@ -10,12 +10,14 @@ import pytest
 from app.utils.validators import (
     ValidationError,
     clean_text,
+    validate_currency,
     validate_date,
     validate_description,
     validate_duration,
     validate_name,
     validate_price,
     validate_time_range,
+    validate_timezone,
 )
 
 
@@ -76,3 +78,28 @@ def test_invalid_date_rejected():
 def test_description_placeholder_becomes_none():
     assert validate_description("-") is None
     assert validate_description("Классная услуга") == "Классная услуга"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["Europe/Chisinau", "Europe/Bucharest", "America/New_York", "UTC"],
+)
+def test_valid_timezones_accepted(value):
+    assert validate_timezone(value) == value
+
+
+@pytest.mark.parametrize("value", ["Not/AZone", "UTC+2", "", "GMT+3", "Chisinau"])
+def test_invalid_timezones_rejected(value):
+    with pytest.raises(ValidationError):
+        validate_timezone(value)
+
+
+@pytest.mark.parametrize("value", ["mdl", "RON", " eur "])
+def test_valid_currencies_normalized_to_uppercase(value):
+    assert validate_currency(value) == value.strip().upper()
+
+
+@pytest.mark.parametrize("value", ["", "M", "MDLL", "12", "M1D"])
+def test_invalid_currencies_rejected(value):
+    with pytest.raises(ValidationError):
+        validate_currency(value)

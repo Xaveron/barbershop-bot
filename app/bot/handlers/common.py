@@ -11,13 +11,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.handlers.onboarding import render_onboarding_entry
 from app.bot.i18n import LANGUAGE_NAMES, LANGUAGES, normalize_language, t
 from app.bot.keyboards.callbacks import LangCB, MenuCB, NavCB
 from app.bot.keyboards.client import languages_kb, main_menu_kb
 from app.bot.utils import edit_message
 from app.config import Settings
-from app.database.models import User
-from app.database.repositories import UserRepository
+from app.database.models import Permission, StaffMember, TenantStatus, User
+from app.database.repositories import StaffRepository, TenantRepository, UserRepository
+from app.services.authorization import AuthorizationService
+from app.services.onboarding import TenantOnboardingService
 from app.utils.text import esc
 
 logger = logging.getLogger(__name__)
@@ -28,12 +31,21 @@ router = Router(name="common")
 async def cmd_start(
     message: Message,
     state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
     user: User,
     settings: Settings,
+    staff: StaffMember | None,
     is_admin: bool,
     lang: str,
 ) -> None:
     await state.clear()
+
+    tenant = await TenantRepository(session).get(tenant_id)
+    if tenant is not None and tenant.status != TenantStatus.ACTIVE:
+        await _handle_inactive_tenant(message, state, session, settings, tenant_id, staff, lang)
+        return
+
     await message.answer(
         t(
             "common.greeting",
@@ -43,6 +55,43 @@ async def cmd_start(
         ),
         reply_markup=main_menu_kb(lang, is_admin=is_admin),
     )
+
+
+async def _handle_inactive_tenant(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+    tenant_id: uuid.UUID,
+    staff: StaffMember | None,
+    lang: str,
+) -> None:
+    """Арендатор ещё не ACTIVE (онбординг/приостановлен): обычным клиентам —
+    нейтральное сообщение без меню и без входа в запись (см.
+    docs/TENANT_ONBOARDING_DESIGN.md §7), владельцу/админу арендатора —
+    мастер онбординга. ADMIN_ID пользователь, если у арендатора ещё нет ни
+    одного сотрудника, становится TENANT_OWNER здесь же — единственный
+    временный мост через платформенный ADMIN_ID (см. §4)."""
+    telegram_id = message.from_user.id if message.from_user else None
+    is_super_admin = telegram_id is not None and settings.is_admin(telegram_id)
+    can_manage_tenant = AuthorizationService.has_permission(
+        staff, Permission.MANAGE_TENANT, is_super_admin=is_super_admin
+    )
+
+    if not can_manage_tenant and is_super_admin and telegram_id is not None:
+        staff_repo = StaffRepository(session, tenant_id)
+        if not await staff_repo.has_any_staff():
+            await TenantOnboardingService(session, tenant_id).ensure_owner(
+                telegram_id=telegram_id, actor_telegram_id=telegram_id
+            )
+            await message.answer(t("onboarding.owner_claimed", lang))
+            can_manage_tenant = True
+
+    if can_manage_tenant:
+        await render_onboarding_entry(message, state, session, tenant_id, lang)
+        return
+
+    await message.answer(t("onboarding.not_active_customer", lang))
 
 
 @router.message(Command("help"))

@@ -102,7 +102,7 @@ async def run() -> None:
         logger.error("Не удалось подключиться к базе данных: %s", mask_secrets(str(exc)))
         return
 
-    tenant_id = await resolve_default_tenant_id(session_factory)
+    tenant_id = await resolve_default_tenant_id(session_factory, settings)
 
     session = None
     if settings.telegram_api_base:
