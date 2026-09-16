@@ -6,6 +6,47 @@
 > was only ever read twice, read-only, to confirm it stayed at migration `0003` throughout — see
 > `docs/MIGRATION_0010_REHEARSAL.md` for that rehearsal's full record.
 
+> ## ⚠ ENTRYPOINT HAZARD — read this before running ANY `docker compose` command against the `bot` service
+>
+> **`docker-entrypoint.sh` unconditionally runs `alembic upgrade head` before executing whatever
+> command you asked for.** Its actual content is:
+> ```sh
+> set -e
+> alembic upgrade head
+> ...
+> exec "$@"
+> ```
+> This means **`docker compose run bot <command>` — for ANY `<command>`, including one that looks
+> purely like inspection or an administrative one-off — is NOT a read-only operation.** The
+> migration step runs first, unconditionally, against whatever `DATABASE_URL` that service resolves
+> to (production's, in the `bot` service's normal configuration), before your intended `<command>`
+> ever executes.
+>
+> This is not theoretical: on 2026-09-16, exactly this happened for real (see §12). An operator
+> intended to run `docker compose run --rm bot alembic heads` as a read-only check of a freshly
+> built image's migration metadata. The entrypoint's forced `alembic upgrade head` ran first, using
+> the `bot` service's real production `DATABASE_URL`, and migrated the real production database from
+> `0003` to `0013` — before `alembic heads` was ever reached. No data was lost and the deployment was
+> recovered (§12), but this must never happen again through the same mistake.
+>
+> **The only safe patterns for inspecting or running one-off commands against the `bot` image are:**
+> 1. **`--entrypoint` override** — replaces `docker-entrypoint.sh` entirely, so the auto-migration
+>    never runs: `docker run --rm --entrypoint alembic -e DATABASE_URL=<dummy> <image> heads`, or
+>    `docker compose run --rm --entrypoint python bot -m app.register_bot --tenant-id <uuid>`.
+> 2. **Host-side commands** — run directly on the host machine, never inside any container, against
+>    the database's host-mapped port (`docker-compose.yml` binds Postgres to `127.0.0.1` for exactly
+>    this). See §6.
+> 3. **`docker compose exec <service> <command>`** (not `run`) — attaches to an *already-running*
+>    container and does **not** re-invoke `ENTRYPOINT` at all. Safe for read-only queries against the
+>    already-running `db`/`redis` services (e.g. `docker compose exec -T db psql ...`). Do not rely on
+>    this for the `bot` service specifically if you need it to reflect a newly built image — `exec`
+>    only sees whatever image the currently-running container already has.
+>
+> The **only** two places in this whole document where invoking the real entrypoint against
+> production is intentional and correct are §5 step 5 (the actual migration) and §5 step 11
+> (starting the new build, once the database is already confirmed at `0013`, making that
+> entrypoint's migration step a safe no-op).
+
 This document has three zones. Read the label on every command block before running it.
 
 - 🟢 **LOCAL/SCRATCH** — a throwaway database, safe to break, safe to drop.
@@ -130,35 +171,148 @@ migration).
 **Do not rely on the default `docker-entrypoint.sh` behavior for this cutover.** It runs
 `alembic upgrade head` unconditionally before starting the bot on every container start — fine for
 routine single-version bumps, but it gives you no checkpoint between "migration ran" and "bot is
-live" for a 7-migration jump. Run the migration as its own explicit, observed step instead (§5).
+live" for a multi-migration jump, and (see the ENTRYPOINT HAZARD box at the top of this document,
+and §12) it means **no `docker compose run bot <anything>` is ever read-only**. Run the migration as
+its own explicit, observed step instead (§5), using the exact image/command discipline described
+there — never a bare `docker compose run bot <command>` for inspection.
 
 ## 5. Production sequence (🔴 — only after §2 is fully done and §5 has been rehearsed in 🟡)
 
-```bash
-# 1. Stop the bot — no writers during migration.
-docker compose stop bot
+**Read the ENTRYPOINT HAZARD box at the top of this document first.** The order below is
+deliberate: the image is built *before* anything is stopped or migrated, so that when the
+migration actually runs, it unambiguously runs from an image that contains `0004`-`0013` — never
+from whatever image happened to be sitting on disk already (§12 is exactly what goes wrong
+otherwise). `register_bot` is not optional and must run before the new bot is started — see the
+explanation below the command block.
 
-# 2. One more backup, immediately before the real change.
+```bash
+# 1. Fresh backup, before touching anything.
 ./tools/backup.sh
 
-# 3. Run the migration as its own step (bypasses the entrypoint's fused
-#    migrate-then-start behavior deliberately — see §4).
+# 2. Build the new image FIRST — before the bot is even stopped, before any
+#    migration runs. This is a purely local build; it does not touch any
+#    running container or the database.
+docker compose build bot
+
+# 3. Confirm the image you just built actually contains through 0013, WITHOUT
+#    touching production — --entrypoint override, dummy DATABASE_URL, no real
+#    connection is made:
+docker run --rm --entrypoint alembic \
+    -e DATABASE_URL=postgresql+asyncpg://x:x@localhost/x \
+    -e BOT_TOKEN=0000000000:AA0000000000000000000000000000000 \
+    barber_rshop-bot:latest heads
+# Expect: "0013 (head)". If you see anything else, STOP — see the STOP
+# CONDITIONS below. Do not proceed to step 4.
+
+# 4. NOW stop the old bot — no writers during migration.
+docker compose stop bot
+
+# 5. Run the migration as its own explicit step, using the image built (and
+#    verified) in steps 2-3. `docker compose run` still invokes the entrypoint
+#    (which is exactly what you want here — this is the one deliberate,
+#    observed migration step), against whatever image is currently tagged for
+#    this service, which is the one you just built:
 docker compose run --rm bot alembic upgrade head
 
-# 4. Verify before declaring success (§6).
-docker compose run --rm -e DATABASE_URL="$DATABASE_URL" bot \
+# 6. Verify the revision landed correctly — read-only, via the already-running
+#    db container (docker compose exec, not run — no entrypoint involved):
+docker compose exec -T db psql -U barber -d barbershop -tAc \
+    "SELECT version_num FROM alembic_version;"
+# Expect exactly: 0013. If not, STOP — see STOP CONDITIONS. Do not proceed.
+
+# 7. Run the production verifier — FROM THE HOST, not inside any container.
+#    scripts/ is not baked into the Docker image (see §6) — this must run
+#    against the database's host-mapped port.
+DATABASE_URL=postgresql+asyncpg://barber:<password>@localhost:5432/barbershop \
     python scripts/verify_production_migration.py
+# Expect: 0 FAIL. WARNs are fine only if they match §6's documented, expected
+# ones. Any FAIL — STOP, see STOP CONDITIONS.
 
-# 5. Only now bring the new build up.
-docker compose up -d --build bot
+# 8. Identify the migrated tenant — read-only:
+docker compose exec -T db psql -U barber -d barbershop -c \
+    "SELECT id, name, status FROM tenants;"
+# Expect exactly one row. Use the ACTUAL returned UUID below — never invent
+# or assume it.
 
-# 6. Smoke test against the live bot (§8), then watch logs.
+# 9. Register the existing bot with that tenant — MANDATORY, not optional
+#    (see explanation below). --entrypoint override bypasses the auto-migration
+#    (already done in step 5; this must not run it again on a whim):
+docker compose run --rm --entrypoint python bot \
+    -m app.register_bot --tenant-id <ACTUAL_TENANT_UUID>
+# Then verify, read-only:
+docker compose exec -T db psql -U barber -d barbershop -c \
+    "SELECT telegram_bot_id, tenant_id, is_active FROM telegram_bot_identities;"
+# Expect exactly one row, is_active = t, tenant_id matching step 8. If
+# registration fails or this doesn't come back as expected — STOP.
+
+# 10. Bootstrap the first PlatformOperator, IF ADMIN_ID/ADMIN_IDS is configured
+#     and you want the platform control plane's explicit record (not required
+#     for the tenant's own /admin panel — migration 0005 already seeded a
+#     tenant_owner staff row from ADMIN_ID at migration time):
+docker compose run --rm --entrypoint python bot -m app.bootstrap_platform_admin
+# Then verify, read-only:
+docker compose exec -T db psql -U barber -d barbershop -c \
+    "SELECT role, is_active FROM platform_operators;"
+# If ADMIN_ID is not configured, or you deliberately don't want this yet,
+# skip this step and record explicitly in your own change log that it was
+# skipped and why — do not skip it silently.
+
+# 11. Only now start the new bot. The entrypoint's own alembic upgrade head
+#     will run again here — since the DB is already at 0013 (step 6), this is
+#     the one place besides step 5 where triggering the entrypoint is correct,
+#     and it is expected to be a safe no-op, not a real migration:
+docker compose up -d bot
+
+# 12. Smoke test against the live bot (§8) — a real human with a real
+#     Telegram client, not simulated.
+
+# 13. Monitor logs.
 docker compose logs -f bot
 ```
 
-If step 3 or step 4 fails, **do not proceed to step 5** — see §9.
+**`register_bot` (step 9) is mandatory, not a nice-to-have, and must happen before step 11.**
+`app/bot/middlewares/bot_identity.py::BotIdentityMiddleware` has no fallback for a bot with no
+`telegram_bot_identities` row: `if identity is None: ... return None` — the update is silently
+dropped. After `0011` lands, if the bot is started (step 11) before it is registered (step 9), the
+container will look healthy (running, no crash) while **silently rejecting every single update**
+from real customers. This is exactly the intended design (per
+`docs/BOT_IDENTITY_ARCHITECTURE.md`) — there is deliberately no "default tenant" fallback anymore —
+so the fix is procedural, not a code change: always register before starting.
+
+### STOP conditions — do not improvise past these
+
+Stop the whole procedure and investigate/report instead of guessing forward if, at any point:
+
+- the built image's `alembic heads` (step 3) does not report `0013`;
+- the post-migration revision (step 6) is not exactly `0013`;
+- `scripts/verify_production_migration.py` (step 7) reports any `FAIL`, or a `WARN` you don't
+  recognize as one of the documented expected ones;
+- exactly one tenant is not returned in step 8 (zero, or more than one);
+- `register_bot` (step 9) exits non-zero, or the follow-up query doesn't show exactly one active
+  identity row pointing at the correct tenant;
+- `bootstrap_platform_admin` (step 10) exits non-zero when it was expected to succeed;
+- the new bot (step 11) fails to start, restarts unexpectedly, or its logs show any exception,
+  traceback, or a "неизвестного/отключённого bot_id" rejection warning;
+- any smoke test (step 12) fails because of application behavior.
+
+In every case above: **do not modify migration files, application code, or the schema to force it
+to pass. Do not run `alembic downgrade`.** Stop, capture the exact error, and follow §9 (restore
+from the backup taken in step 1, or the more recent one from §12 if that's the actual current
+state) rather than improvising a fix mid-cutover.
 
 ## 6. Verification script
+
+**Run this from the host machine, never from inside a container.** `scripts/` is not part of the
+installed `app` package (`pyproject.toml`'s `packages = ["app"]`) and the `Dockerfile` never `COPY`s
+it — no built image, however recently rebuilt, contains `scripts/verify_production_migration.py`.
+`docker compose run`/`exec bot python scripts/verify_production_migration.py` will fail with a
+"file not found" error regardless of the image. Run it directly on the host instead, pointed at the
+database's host-mapped port (bound to `127.0.0.1` in `docker-compose.yml` for exactly this):
+
+```bash
+DATABASE_URL=postgresql+asyncpg://barber:<password>@localhost:5432/barbershop \
+    python scripts/verify_production_migration.py
+```
 
 `scripts/verify_production_migration.py` (formerly `verify_migration_0010.py`, superseded — that
 script's `EXPECTED_HEAD` predated migrations `0011`-`0013` and would misreport a correct `0013`
@@ -259,6 +413,17 @@ instance) and it worked; no downgrade migration in this chain has ever been run 
 but a scratch database, and `0012`/`0013`'s downgrades are known to be lossy by design (see their
 own `downgrade()` functions), so they remain out of scope for a real rollback.
 
+**Restoring an older backup also erases any `telegram_bot_identities`/`platform_operators` rows
+created after that backup was taken.** These are ordinary table rows like any other — a restore
+doesn't selectively preserve them. Concretely: if you restore the backup from §5 step 1 (taken
+*before* `register_bot`/`bootstrap_platform_admin` ran) after those steps have already run, the
+restored database will not know about that bot registration or platform operator at all — you must
+re-run §5 steps 9-10 again after the restore, once you bring that restored database forward to a
+schema those commands expect. The same is true in reverse: if you restore a *post*-registration
+backup (e.g. one taken during §12's recovery), it already contains those rows and nothing further
+is needed on that front — but always re-verify with the same queries from §5 steps 9-10 rather than
+assuming either way.
+
 ## 10. Known risks / open questions for the operator
 
 - Real production row counts are unknown to this phase — the risk table in §3 assumes a small
@@ -268,10 +433,15 @@ own `downgrade()` functions), so they remain out of scope for a real rollback.
 - A real production backup/restore cycle, and the full `0003`→`0013` jump against it, has now been
   exercised for real — see §11. This closes the gap this bullet used to describe; it is kept here
   only so the history of "this was once unverified" isn't lost.
-- The currently-running `barbershop_bot` container is inferred (from §4's compatibility analysis,
-  not from inspecting it directly) to be a pre-multi-tenancy build, since it could not have
-  survived `docker-entrypoint.sh`'s auto-migration if it were already on `0004`+. Confirm what
-  build is actually running before scheduling the window.
+- **Superseded by §12.** This bullet used to say the running container's build was only *inferred*
+  to be pre-multi-tenancy, not confirmed directly. It has since been confirmed directly (the running
+  image's own `app/database/migrations/versions/` was inspected and found to contain only `0001`-
+  `0003`), and as of §12's recovery, production has already been migrated to `0013` and is running a
+  build containing `0001`-`0013` with a registered bot identity and a bootstrapped platform operator.
+  Before any *future* maintenance action, don't assume this document's original `0003`-baseline
+  framing still applies — re-confirm the actual current revision and running image the same way §12
+  did, rather than trusting this file's earlier sections' "production is at `0003`" framing at face
+  value.
 - `README.md`'s own local-testing instructions set `TEST_DATABASE_URL`/`DATABASE_URL` to a database
   named `barbershop` — on any machine where that name is the real compose database (as in the
   environment this phase ran in), following those instructions literally would run migrations and
@@ -318,3 +488,60 @@ never stopped, restarted, or pointed at anything other than what it already was.
 proves the migration path and the backup/restore path both work against this deployment's actual
 data — it does not itself perform the production cutover described in §5; that remains a separate,
 deliberate action for the operator to schedule.
+
+## 12. Incident record — accidental entrypoint-triggered production migration (2026-09-16)
+
+**What happened:** during a preflight step intended to be read-only (inspecting a freshly built
+image's own migration metadata via `docker compose run --rm bot alembic heads`), the container's
+`ENTRYPOINT` (`docker-entrypoint.sh`) ran its unconditional `alembic upgrade head` first, using the
+`bot` service's real production `DATABASE_URL`. Because the image being used had just been rebuilt
+and contained migrations through `0013`, this actually executed the full `0003`→`0013` chain
+against the real production database — before the intended `alembic heads` inspection ever ran.
+This is the exact hazard now called out at the top of this document. No `alembic downgrade` was
+attempted at any point; §9's guidance was followed throughout.
+
+**Verified impact:** zero data loss — every pre-existing row count (`barbers=2`, `services=4`,
+`users=12`, `appointments=5`, `working_schedules=12`, `schedule_exceptions=0`, `notifications=4`)
+was confirmed identical before and after. The migration's own backfills produced exactly the
+expected one tenant, one owner `staff_members` row, and one `legacy`-equivalent subscription. The
+live bot container did not crash or restart during the incident itself — it continued running its
+old, pre-`0004` build against the new schema for a window before being deliberately stopped as the
+first recovery action, per the "stop the old build immediately" principle now reflected in §5.
+
+**Recovery performed, in full, and independently verified at each step:**
+
+1. Old bot stopped (`docker compose stop bot`), confirmed exited cleanly.
+2. Fresh backup taken of the now-`0013` state (`./tools/backup.sh`) — gzip-integrity-verified,
+   non-empty, its own `alembic_version` confirmed `0013`. The original pre-incident `0003` backup
+   was preserved, not deleted.
+3. Current revision re-confirmed as `0013` via read-only query; all core row counts re-confirmed
+   unchanged.
+4. The already-built new image was independently confirmed (via `--entrypoint` override with a
+   dummy, non-production `DATABASE_URL`, and via `docker create`/`cp` file inspection — no
+   production contact) to contain migrations `0001`-`0013`, `app/register_bot.py`, and
+   `app/bootstrap_platform_admin.py`.
+5. The single migrated tenant was identified by its actual returned UUID via a read-only query —
+   never assumed or invented.
+6. `python -m app.register_bot --tenant-id <that UUID>`, run via `--entrypoint python` (bypassing
+   the auto-migration wrapper), succeeded; `telegram_bot_identities` verified to contain exactly one
+   active row pointing at that tenant.
+7. `ADMIN_ID` was confirmed present (by variable name only, value never printed); with it present,
+   `python -m app.bootstrap_platform_admin`, run the same `--entrypoint python` way, succeeded;
+   `platform_operators` verified to contain exactly one active `platform_admin` row.
+8. The new bot was started (`docker compose up -d bot`); its entrypoint's own `alembic upgrade
+   head` ran again but was a confirmed no-op (database already at `0013`); startup logs showed the
+   bot validating its own token, the scheduler configuring 3 jobs for the 1 real tenant, and
+   polling starting successfully — zero errors, zero exceptions, zero "unknown bot_id" rejection
+   warnings in the logs at any point afterward.
+9. **Not performed as part of this recovery: a real, human-operated Telegram smoke test.** The
+   recovery confirmed the bot process is healthy, registered, and receiving no rejection warnings,
+   but an actual `/start`/booking/`/admin` walkthrough by a human with a real Telegram client is
+   still the outstanding, recommended next action and should not be skipped just because the
+   automated checks above were clean.
+
+**Why this must not recur:** the entrypoint's behavior itself was not changed (out of scope for
+this documentation-only correction, and not something to fix by weakening `set -e`'s fail-closed
+migration-on-start behavior for routine restarts) — the fix is procedural: every command in this
+document that touches the `bot` service now either uses `--entrypoint` override, runs on the host,
+uses `docker compose exec` against an already-running container, or is one of the two deliberate,
+labeled points (§5 steps 5 and 11) where invoking the real entrypoint is intentional.
