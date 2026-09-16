@@ -26,7 +26,7 @@ from app.bot.states import AdminFieldSG, AdminServiceSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
 from app.database.models import LimitKey, Permission, Service
-from app.database.repositories import BranchRepository, ServiceRepository
+from app.database.repositories import BranchRepository, ServiceRepository, TenantRepository
 from app.services.billing import BillingError, LimitService
 from app.services.provisioning import ServiceProvisioningService
 from app.utils.dt import format_duration
@@ -266,6 +266,15 @@ async def add_service_description(
 
     data = await state.get_data()
     await state.clear()
+    # Валюта — из Tenant.currency (дефолт арендатора для новых сущностей, см.
+    # Phase 9C/9E), а не process-wide settings.default_currency: в одном
+    # процессе могут обслуживаться несколько арендаторов с разной валютой
+    # (тот же класс бага, что settings.default_language до Phase 9E). У
+    # Service нет поля "редактировать валюту" в admin_service_kb, так что
+    # ошибка на этом шаге не исправима из UI впоследствии — найдено и
+    # исправлено по ходу Phase 9G.
+    tenant = await TenantRepository(session).get(tenant_id)
+    currency = tenant.currency if tenant is not None else settings.default_currency
     provisioning = ServiceProvisioningService(session, tenant_id)
     try:
         service = await provisioning.create_service(
@@ -273,7 +282,7 @@ async def add_service_description(
             duration_minutes=int(data["duration"]),
             price=Decimal(data["price"]),
             description=description,
-            currency=settings.default_currency,
+            currency=currency,
         )
         await session.commit()
     except BillingError as exc:

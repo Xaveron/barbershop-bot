@@ -17,9 +17,9 @@ from app.bot.keyboards.callbacks import AdmCB
 from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import AdminBranchSG, AdminFieldSG
 from app.bot.utils import alert, edit_message, parse_uuid
-from app.database.models import Branch, Permission
+from app.database.models import Branch, LimitKey, Permission
 from app.database.repositories import BranchRepository
-from app.services.billing import BillingError
+from app.services.billing import BillingError, LimitService
 from app.services.provisioning import BranchProvisioningService
 from app.utils.text import esc
 from app.utils.validators import ValidationError, validate_description, validate_name
@@ -209,6 +209,20 @@ async def toggle_branch(
     if branch is None:
         await alert(callback, t("admin.branch.not_found", staff_lang))
         return
+    if not branch.is_active:
+        # Реактивация — на один активный ресурс больше, проверяется тем же
+        # LimitService.assert_can_create, что и создание нового филиала (см.
+        # Phase 9B §M-2, тот же паттерн уже применён к барберам/услугам в
+        # admin/barbers.py::toggle_barber и admin/services.py::toggle_service):
+        # нельзя обойти MAX_BRANCHES циклом скрыть→создать→показать. Найдено
+        # и исправлено по ходу Phase 9G — этот путь был единственным из трёх
+        # toggle-хендлеров без проверки лимита при реактивации.
+        try:
+            await LimitService(session, tenant_id).assert_can_create(LimitKey.MAX_BRANCHES)
+        except BillingError as exc:
+            await session.rollback()
+            await alert(callback, describe_billing_error(exc, staff_lang))
+            return
     branch.is_active = not branch.is_active
     await session.commit()
     text, markup = branch_card(branch, staff_lang)
