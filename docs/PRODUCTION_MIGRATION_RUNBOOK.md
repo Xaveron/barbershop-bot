@@ -147,7 +147,7 @@ docker compose run --rm bot alembic upgrade head
 
 # 4. Verify before declaring success (§6).
 docker compose run --rm -e DATABASE_URL="$DATABASE_URL" bot \
-    python scripts/verify_migration_0010.py
+    python scripts/verify_production_migration.py
 
 # 5. Only now bring the new build up.
 docker compose up -d --build bot
@@ -160,12 +160,18 @@ If step 3 or step 4 fails, **do not proceed to step 5** — see §9.
 
 ## 6. Verification script
 
-`scripts/verify_migration_0010.py` is read-only (no `INSERT`/`UPDATE`/`DELETE` anywhere in it) and
-checks, against whatever `DATABASE_URL` you point it at: `alembic_version` is at `0010`; every
-table introduced by `0004`-`0010` exists; the double-booking `EXCLUDE` constraint and the
-tenant-owner partial unique index both exist; every tenant has exactly one subscription resolving
-to a known plan; and there is zero cross-tenant leakage across every branch/barber/service/staff
-association table. It exits non-zero and prints which check failed if anything is wrong. Run it
+`scripts/verify_production_migration.py` (formerly `verify_migration_0010.py`, superseded — that
+script's `EXPECTED_HEAD` predated migrations `0011`-`0013` and would misreport a correct `0013`
+database as a failure) is read-only (no `INSERT`/`UPDATE`/`DELETE` anywhere in it) and checks,
+against whatever `DATABASE_URL` you point it at: `alembic_version` is at `0013`; every table
+introduced by `0004`-`0012` exists; the double-booking `EXCLUDE` constraint and the tenant-owner
+partial unique index both exist; every tenant has exactly one subscription resolving to a known
+plan; zero cross-tenant leakage across every branch/barber/service/staff association table; the
+`telegram_bot_identities` FK/uniqueness/row validity from `0011`; the `platform_operators`
+uniqueness/row validity and `audit_log_entries.tenant_id` nullability from `0012`; and the
+`tenants.default_language`/`staff_members.language` column shape and supported-language values from
+`0013`. Each check prints `PASS`, `WARN` (worth a look, not a failure — e.g. no bots/platform
+operators registered yet), or `FAIL`. It exits non-zero only if something actually failed. Run it
 against the restored copy during rehearsal and against production immediately after the real
 migration (§5 step 4) — never skip it because the migration "looked like it worked."
 
