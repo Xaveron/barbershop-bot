@@ -253,12 +253,21 @@ If something goes wrong:
    restore to a pre-`0004` backup, that means redeploying the pre-multi-tenancy build, not the new
    one (see §4's compatibility evidence — the new build cannot run against that schema at all).
 
+This restore-based approach — never `alembic downgrade` — is not just a recommendation: §11
+exercised exactly this restore path for real (a real production backup, restored into an isolated
+instance) and it worked; no downgrade migration in this chain has ever been run against anything
+but a scratch database, and `0012`/`0013`'s downgrades are known to be lossy by design (see their
+own `downgrade()` functions), so they remain out of scope for a real rollback.
+
 ## 10. Known risks / open questions for the operator
 
 - Real production row counts are unknown to this phase — the risk table in §3 assumes a small
   single-shop dataset. Confirm via §2.3 before trusting the "negligible/low" assessments at scale.
-- No real production backup/restore cycle was exercised in this phase (none was available in this
-  environment) — §2's steps 1-2 must be performed for real, once, before the actual cutover.
+  (Phase 10B's real rehearsal, §11, confirms the actual production dataset — 2 barbers, 4 services,
+  12 users, 5 appointments — is indeed at this small end of the range.)
+- A real production backup/restore cycle, and the full `0003`→`0013` jump against it, has now been
+  exercised for real — see §11. This closes the gap this bullet used to describe; it is kept here
+  only so the history of "this was once unverified" isn't lost.
 - The currently-running `barbershop_bot` container is inferred (from §4's compatibility analysis,
   not from inspecting it directly) to be a pre-multi-tenancy build, since it could not have
   survived `docker-entrypoint.sh`'s auto-migration if it were already on `0004`+. Confirm what
@@ -270,3 +279,42 @@ If something goes wrong:
   fixed before anyone follows that README section against a real deployment host.
 - `CREATE INDEX`/`ADD CONSTRAINT` statements throughout the chain are not `CONCURRENTLY` — fine at
   small scale, worth revisiting only if §2.3's counts turn out to be large.
+
+## 11. Phase 10B — real backup/restore rehearsal, exact `0003`→`0013` jump
+
+Unlike §1-§10 above (which cover `0003`→`0010`, Phase 6.5, rehearsed only on scratch/reconstructed
+data — see `docs/MIGRATION_0010_REHEARSAL.md`), this section records a rehearsal that ran the real
+target of the eventual cutover: the actual production database (`barbershop_db`'s `barbershop` DB,
+via `tools/backup.sh`, unmodified — no `INSERT`/`UPDATE`/`DELETE`/`ALTER`/`DROP` was ever issued
+against it), restored into a disposable, isolated `postgres:16-alpine` container
+(`barbershop_migration_rehearsal_0013`, unrelated to and never connected to any application
+container), then migrated through the full current chain, `0003`→`0013`, not just `0003`→`0010`.
+
+**What was confirmed, for real, not on synthetic data:**
+
+- The real production backup, taken via the unmodified `tools/backup.sh`, restores cleanly and
+  independently confirms production's own `alembic_version` is `0003` (read directly from the
+  backup file's own `COPY public.alembic_version` data — not merely assumed).
+- `alembic upgrade head` against the restored copy applies `0003`→`0004`→`0005`→`0006`→`0007`→
+  `0008`→`0009`→`0010`→`0011`→`0012`→`0013` in exact sequence, no skips, no manual stamping, in
+  under one second on this dataset (2 barbers, 4 services, 12 users, 5 appointments, 12 working
+  schedules, 4 notifications, 0 schedule exceptions — the real production dataset, confirmed small,
+  as §3/§10 always assumed but never verified until now).
+- Every pre-existing row survived the jump with an identical count on the other side; the
+  auto-created tenant/branch/subscription/owner-staff rows appeared exactly once, matching `0004`/
+  `0007`/`0009`/`0010`'s backfill design.
+- `python scripts/verify_production_migration.py` against the migrated, restored copy: 45/47 PASS,
+  2 WARN (`telegram_bot_identities`/`platform_operators` both empty — expected and correct, since
+  this production deployment predates bot-identity/platform-operator provisioning entirely and
+  neither `python -m app.register_bot` nor `python -m app.bootstrap_platform_admin` has been run
+  against it yet), 0 FAIL.
+- No cross-tenant leakage, no orphaned `tenant_id`, the EXCLUDE booking constraint and the
+  tenant-owner partial unique index both survived intact, `audit_log_entries.tenant_id` is nullable,
+  and `tenants.default_language`/`staff_members.language` hold only supported values.
+
+**What this does not change:** the disposable rehearsal container was removed immediately after
+recording these results; the real production database was never written to, and the real bot was
+never stopped, restarted, or pointed at anything other than what it already was. This rehearsal
+proves the migration path and the backup/restore path both work against this deployment's actual
+data — it does not itself perform the production cutover described in §5; that remains a separate,
+deliberate action for the operator to schedule.
