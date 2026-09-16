@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.database.repositories import AppointmentRepository, UserRepository
-from app.utils.dt import combine_local, now_utc
+from app.utils.dt import now_utc
 
 
 @dataclass(slots=True)
@@ -28,34 +28,40 @@ class Stats:
 
 
 class StatsService:
+    """"Сегодня"/"этот месяц" вычисляются branch-local (Branch.timezone —
+    authoritative, см. §H-3 Phase 9B), а не по одному общему settings.tz:
+    для тенанта с филиалами в разных часовых поясах "сегодня" у каждой
+    записи — это сегодня по часовому поясу ЕЁ ФИЛИАЛА. Вся арифметика дат
+    живёт в AppointmentRepository (JOIN на branches + timezone()/date_trunc()
+    в SQL), а не здесь — этот сервис лишь передаёт "сейчас" (единственный
+    момент, общий для всех записей и филиалов, конвертируемый в локальное
+    время каждой строки уже в БД)."""
+
     def __init__(self, session: AsyncSession, settings: Settings, tenant_id: uuid.UUID) -> None:
         self.session = session
         self.settings = settings
-        self.tz = settings.tz
         self.appointments = AppointmentRepository(session, tenant_id)
         self.users = UserRepository(session, tenant_id)
 
-    async def collect(self) -> Stats:
-        """Собирает статистику за 4 запроса: сводка, клиенты и два топа."""
-        now = now_utc()
-        today_local = now.astimezone(self.tz).date()
-        day_start = combine_local(today_local, datetime.min.time(), self.tz)
-        day_end = day_start + timedelta(days=1)
-        month_start = combine_local(today_local.replace(day=1), datetime.min.time(), self.tz)
-        far_future = now + timedelta(days=3650)
+    async def collect(
+        self, *, branch_ids: Collection[uuid.UUID] | None = None
+    ) -> Stats:
+        """Собирает статистику за 4 запроса: сводка, клиенты и два топа.
 
-        summary = await self.appointments.summary(
-            now=now, day_start=day_start, day_end=day_end, month_start=month_start
-        )
+        branch_ids=None — без ограничений (OWNER/ADMIN/платформенный
+        SUPER_ADMIN); иначе — статистика только по доступным сотруднику
+        филиалам (см. §C-1, Phase 9A)."""
+        now = now_utc()
+        summary = await self.appointments.summary(now=now, branch_ids=branch_ids)
         return Stats(
             total_appointments=summary["total"],
             upcoming_appointments=summary["upcoming"],
             today_appointments=summary["today"],
             month_appointments=summary["month"],
             cancelled_month=summary["cancelled_month"],
-            clients=await self.users.count(),
+            clients=await self.users.count(branch_ids=branch_ids),
             revenue_month=summary["revenue_month"],
             revenue_today=summary["revenue_today"],
-            top_services=await self.appointments.top_services(start=month_start, end=far_future),
-            top_barbers=await self.appointments.top_barbers(start=month_start, end=far_future),
+            top_services=await self.appointments.top_services(now=now, branch_ids=branch_ids),
+            top_barbers=await self.appointments.top_barbers(now=now, branch_ids=branch_ids),
         )

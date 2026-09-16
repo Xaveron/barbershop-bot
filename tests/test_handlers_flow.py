@@ -25,14 +25,17 @@ from app.database.models import (
     Barber,
     BarberBranch,
     Branch,
+    Role,
     Service,
+    StaffMember,
     TelegramBotIdentity,
     Tenant,
     TenantStatus,
     User,
     WorkingSchedule,
 )
-from app.utils.dt import now_utc
+from app.database.repositories import BranchRepository, StaffRepository
+from app.utils.dt import combine_local, now_utc
 from app.utils.text import TELEGRAM_TEXT_LIMIT
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
@@ -509,3 +512,448 @@ async def test_domain_error_is_translated(dispatcher, mocked_bot, session_factor
     answer = texts(calls)
     assert "programări active" in answer, answer
     assert "активных записей" not in answer
+
+
+# --- H-1: управление персоналом (Phase 9A) -----------------------------------
+STAFF_OWNER_ID = 990_200
+STAFF_MANAGER_ID = 990_201
+NEW_STAFF_TG_ID = 990_202
+
+
+@pytest.fixture
+async def staff_pair(session_factory, tenant_id):
+    """OWNER (MANAGE_STAFF) и MANAGER (VIEW_STAFF, но не MANAGE_STAFF) —
+    намеренно НЕ через is_super_admin/ADMIN_ID, а через реальные роли, чтобы
+    проверялась настоящая RBAC-ветка, а не платформенный обход."""
+    async with session_factory() as session:
+        repo = StaffRepository(session, tenant_id)
+        await repo.create(telegram_id=STAFF_OWNER_ID, role=Role.TENANT_OWNER)
+        await repo.create(telegram_id=STAFF_MANAGER_ID, role=Role.MANAGER)
+        await session.commit()
+
+    yield
+
+    async with session_factory() as session:
+        await session.execute(
+            delete(StaffMember).where(
+                StaffMember.telegram_id.in_(
+                    (STAFF_OWNER_ID, STAFF_MANAGER_ID, NEW_STAFF_TG_ID)
+                )
+            )
+        )
+        await session.commit()
+
+
+async def _add_staff_via_ui(
+    dispatcher, mocked_bot, actor_id: int, telegram_id: int, role_value: str
+) -> list[tuple[str, str | None]]:
+    await feed(dispatcher, mocked_bot, make_callback("ad:stf_add:", actor_id))
+    await feed(dispatcher, mocked_bot, make_message(str(telegram_id), actor_id))
+    await feed(dispatcher, mocked_bot, make_callback(f"ad:stf_add_role:{role_value}", actor_id))
+    return await feed(dispatcher, mocked_bot, make_callback("ad:stf_add_confirm:", actor_id))
+
+
+async def test_manage_staff_can_add_staff(dispatcher, mocked_bot, shop, staff_pair):
+    calls = await _add_staff_via_ui(
+        dispatcher, mocked_bot, STAFF_OWNER_ID, NEW_STAFF_TG_ID, "receptionist"
+    )
+    assert str(NEW_STAFF_TG_ID) in texts(calls)
+    assert "Ресепшн" in texts(calls)
+
+
+async def test_view_staff_cannot_add_staff(dispatcher, mocked_bot, shop, staff_pair):
+    calls = await _add_staff_via_ui(
+        dispatcher, mocked_bot, STAFF_MANAGER_ID, NEW_STAFF_TG_ID, "receptionist"
+    )
+    assert calls == [("AnswerCallbackQuery", "Недостаточно прав.")]
+
+
+async def test_manage_staff_can_change_role(dispatcher, mocked_bot, session_factory, tenant_id, shop, staff_pair):
+    async with session_factory() as session:
+        staff = await StaffRepository(session, tenant_id).create(
+            telegram_id=NEW_STAFF_TG_ID, role=Role.MANAGER
+        )
+        await session.commit()
+        staff_id = str(staff.id)
+
+    await feed(dispatcher, mocked_bot, make_callback(f"ad:stf_role_pick:{staff_id}", STAFF_OWNER_ID))
+    await feed(
+        dispatcher, mocked_bot, make_callback(f"ad:stf_role_set:{staff_id}|receptionist", STAFF_OWNER_ID)
+    )
+    calls = await feed(
+        dispatcher,
+        mocked_bot,
+        make_callback(f"ad:stf_role_confirm:{staff_id}|receptionist", STAFF_OWNER_ID),
+    )
+    assert "Ресепшн" in texts(calls)
+
+
+async def test_manage_staff_can_deactivate(dispatcher, mocked_bot, session_factory, tenant_id, shop, staff_pair):
+    async with session_factory() as session:
+        staff = await StaffRepository(session, tenant_id).create(
+            telegram_id=NEW_STAFF_TG_ID, role=Role.MANAGER
+        )
+        await session.commit()
+        staff_id = str(staff.id)
+
+    await feed(dispatcher, mocked_bot, make_callback(f"ad:stf_deact:{staff_id}", STAFF_OWNER_ID))
+    calls = await feed(
+        dispatcher, mocked_bot, make_callback(f"ad:stf_deact_ok:{staff_id}", STAFF_OWNER_ID)
+    )
+    assert "скрыт" in texts(calls)
+
+    async with session_factory() as session:
+        refreshed = await StaffRepository(session, tenant_id).get(staff.id)
+        assert refreshed.is_active is False
+
+
+async def test_view_staff_cannot_change_role_or_deactivate(
+    dispatcher, mocked_bot, session_factory, tenant_id, shop, staff_pair
+):
+    async with session_factory() as session:
+        staff = await StaffRepository(session, tenant_id).create(
+            telegram_id=NEW_STAFF_TG_ID, role=Role.RECEPTIONIST
+        )
+        await session.commit()
+        staff_id = str(staff.id)
+
+    role_calls = await feed(
+        dispatcher,
+        mocked_bot,
+        make_callback(f"ad:stf_role_confirm:{staff_id}|manager", STAFF_MANAGER_ID),
+    )
+    assert role_calls == [("AnswerCallbackQuery", "Недостаточно прав.")]
+
+    deact_calls = await feed(
+        dispatcher, mocked_bot, make_callback(f"ad:stf_deact_ok:{staff_id}", STAFF_MANAGER_ID)
+    )
+    assert deact_calls == [("AnswerCallbackQuery", "Недостаточно прав.")]
+
+    async with session_factory() as session:
+        refreshed = await StaffRepository(session, tenant_id).get(staff.id)
+        assert refreshed.role == Role.RECEPTIONIST
+        assert refreshed.is_active is True
+
+
+async def test_sole_owner_cannot_be_demoted_or_deactivated_via_ui(
+    dispatcher, mocked_bot, session_factory, tenant_id, shop, staff_pair
+):
+    async with session_factory() as session:
+        owner = await StaffRepository(session, tenant_id).get_by_telegram_id(STAFF_OWNER_ID)
+        owner_id = str(owner.id)
+
+    role_calls = await feed(
+        dispatcher,
+        mocked_bot,
+        make_callback(f"ad:stf_role_confirm:{owner_id}|manager", STAFF_OWNER_ID),
+    )
+    assert "единственный активный владелец" in texts(role_calls)
+
+    deact_calls = await feed(
+        dispatcher, mocked_bot, make_callback(f"ad:stf_deact_ok:{owner_id}", STAFF_OWNER_ID)
+    )
+    assert "единственный активный владелец" in texts(deact_calls)
+
+    async with session_factory() as session:
+        refreshed = await StaffRepository(session, tenant_id).get_by_telegram_id(STAFF_OWNER_ID)
+        assert refreshed.role == Role.TENANT_OWNER
+        assert refreshed.is_active is True
+
+
+async def test_cross_tenant_staff_id_cannot_be_mutated_via_forged_callback(
+    dispatcher, mocked_bot, session_factory, shop, staff_pair
+):
+    """Подделанный staff_id, принадлежащий ДРУГОМУ арендатору, не должен
+    резолвиться через tenant_id текущего бота (см. Phase 9A §H-1/§6)."""
+    other_tenant = Tenant(name="Other Tenant", slug=f"other-{uuid.uuid4().hex[:8]}")
+    async with session_factory() as session:
+        session.add(other_tenant)
+        await session.flush()
+        foreign_staff = await StaffRepository(session, other_tenant.id).create(
+            telegram_id=990_888_001, role=Role.MANAGER
+        )
+        await session.commit()
+        foreign_id = str(foreign_staff.id)
+
+    try:
+        calls = await feed(
+            dispatcher,
+            mocked_bot,
+            make_callback(f"ad:stf_role_pick:{foreign_id}", STAFF_OWNER_ID),
+        )
+        assert calls == [("AnswerCallbackQuery", "Сотрудник не найден.")]
+
+        deact_calls = await feed(
+            dispatcher, mocked_bot, make_callback(f"ad:stf_deact:{foreign_id}", STAFF_OWNER_ID)
+        )
+        assert deact_calls == [("AnswerCallbackQuery", "Сотрудник не найден.")]
+    finally:
+        async with session_factory() as session:
+            await session.execute(delete(Tenant).where(Tenant.id == other_tenant.id))
+            await session.commit()
+
+
+async def test_staff_branch_assignment_still_works(
+    dispatcher, mocked_bot, session_factory, tenant_id, shop, staff_pair
+):
+    """Регрессия: существующая привязка сотрудника к филиалу (toggle_staff_branch)
+    не должна быть сломана добавлением новых H-1 хендлеров."""
+    _barber_id, _service_id, branch_id = shop
+    async with session_factory() as session:
+        staff = await StaffRepository(session, tenant_id).create(
+            telegram_id=NEW_STAFF_TG_ID, role=Role.RECEPTIONIST
+        )
+        await session.commit()
+        staff_id = str(staff.id)
+
+    await feed(dispatcher, mocked_bot, make_callback(f"ad:stf:{staff_id}", STAFF_OWNER_ID))
+    calls = await feed(
+        dispatcher, mocked_bot, make_callback(f"ad:stf_branch:{branch_id}", STAFF_OWNER_ID)
+    )
+    assert "Сохранено" in [text for _, text in calls] or any(
+        method == "AnswerCallbackQuery" and text == "Сохранено" for method, text in calls
+    )
+    async with session_factory() as session:
+        assigned = await BranchRepository(session, tenant_id).list_branches_for_staff(staff.id)
+    assert {b.id for b in assigned} == {branch_id}
+
+
+# --- H-4: массовая отмена — branch/timezone safety (Phase 9A) ---------------
+# tz_branch использует фиксированное смещение Etc/GMT+12 (без DST), заведомо
+# далёкое от settings.tz (Europe/Chisinau, UTC+2/+3) — запись ставится на
+# 12:00 по branch.tz, что соответствует уже СЛЕДУЮЩИМ суткам по Кишинёву.
+# Если бы confirm/execute всё ещё считали окно в settings.tz (старый баг),
+# эта запись не нашлась бы под тем же target_date — тест поймал бы регресс.
+BULK_CANCEL_MANAGER_ID = 990_300
+
+
+@pytest.fixture
+async def tz_branch(session_factory, tenant_id, shop):
+    _barber_id, service_id, _branch_id = shop
+    marker = uuid.uuid4().hex[:6]
+    async with session_factory() as session:
+        branch = Branch(tenant_id=tenant_id, name=f"TZ-{marker}", timezone="Etc/GMT+12")
+        barber = Barber(tenant_id=tenant_id, name=f"TZBarber-{marker}")
+        client = User(
+            tenant_id=tenant_id,
+            telegram_id=990_300_000 + int(marker[:4], 16) % 1000,
+            full_name="TZ Client",
+        )
+        session.add_all([branch, barber, client])
+        await session.flush()
+        session.add(BarberBranch(tenant_id=tenant_id, barber_id=barber.id, branch_id=branch.id))
+
+        target_date = (now_utc().astimezone(branch.tz) + timedelta(days=3)).date()
+        starts_at = combine_local(target_date, time(12, 0), branch.tz)
+        appt = Appointment(
+            tenant_id=tenant_id, branch_id=branch.id,
+            user_id=client.id, barber_id=barber.id, service_id=service_id,
+            starts_at=starts_at, ends_at=starts_at + timedelta(minutes=30),
+            status=AppointmentStatus.CONFIRMED, price=Decimal("100"), duration_minutes=30,
+        )
+        session.add(appt)
+        await session.commit()
+        ids = {
+            "branch_id": branch.id, "barber_id": barber.id, "appt_id": appt.id,
+            "client_id": client.id, "target_date": target_date,
+        }
+
+    yield ids
+
+    async with session_factory() as session:
+        await session.execute(delete(Appointment).where(Appointment.id == ids["appt_id"]))
+        await session.execute(delete(BarberBranch).where(BarberBranch.barber_id == ids["barber_id"]))
+        await session.execute(delete(Barber).where(Barber.id == ids["barber_id"]))
+        await session.execute(delete(User).where(User.id == ids["client_id"]))
+        await session.execute(delete(Branch).where(Branch.id == ids["branch_id"]))
+        await session.commit()
+
+
+async def test_bulk_cancel_uses_branch_timezone_not_settings_tz(
+    dispatcher, mocked_bot, session_factory, shop, tz_branch, staff_pair
+):
+    branch_id = tz_branch["branch_id"]
+    target_date = tz_branch["target_date"]
+
+    await feed(dispatcher, mocked_bot, make_callback("ad:bcx_days:", STAFF_OWNER_ID))
+    candidates = [d for _, d in mocked_bot.buttons if d and d.startswith("ad:bcx_branch:")]
+    target_button = next(c for c in candidates if c.endswith(str(branch_id)))
+    await feed(dispatcher, mocked_bot, make_callback(target_button, STAFF_OWNER_ID))
+
+    day_button = button(mocked_bot, "ad:bcx_conf:")
+    assert day_button == f"ad:bcx_conf:{branch_id}|{target_date.isoformat()}"
+    await feed(dispatcher, mocked_bot, make_callback(day_button, STAFF_OWNER_ID))
+
+    confirm_button = button(mocked_bot, "ad:bcx_ok:")
+    assert confirm_button == f"ad:bcx_ok:{branch_id}|{target_date.isoformat()}"
+    calls = await feed(dispatcher, mocked_bot, make_callback(confirm_button, STAFF_OWNER_ID))
+    assert "Отменено 1" in texts(calls)
+
+    async with session_factory() as session:
+        appt = await session.get(Appointment, tz_branch["appt_id"])
+        assert appt.status == AppointmentStatus.CANCELLED
+
+
+async def test_bulk_cancel_forged_branch_id_rejected_when_inaccessible(
+    dispatcher, mocked_bot, session_factory, tenant_id, shop, tz_branch, staff_pair
+):
+    _barber_id, _service_id, shop_branch_id = shop
+    async with session_factory() as session:
+        manager = await StaffRepository(session, tenant_id).create(
+            telegram_id=BULK_CANCEL_MANAGER_ID, role=Role.MANAGER
+        )
+        await session.commit()
+        await BranchRepository(session, tenant_id).assign_staff(
+            staff_member_id=manager.id, branch_id=shop_branch_id
+        )
+        await session.commit()
+
+    try:
+        branch_id = tz_branch["branch_id"]
+        target_date = tz_branch["target_date"]
+        forged_branch_calls = await feed(
+            dispatcher,
+            mocked_bot,
+            make_callback(f"ad:bcx_branch:{branch_id}", BULK_CANCEL_MANAGER_ID),
+        )
+        assert "Недостаточно прав или филиал недоступен." in texts(forged_branch_calls)
+
+        forged_conf_calls = await feed(
+            dispatcher,
+            mocked_bot,
+            make_callback(
+                f"ad:bcx_conf:{branch_id}|{target_date.isoformat()}", BULK_CANCEL_MANAGER_ID
+            ),
+        )
+        assert "Недостаточно прав или филиал недоступен." in texts(forged_conf_calls)
+
+        forged_ok_calls = await feed(
+            dispatcher,
+            mocked_bot,
+            make_callback(
+                f"ad:bcx_ok:{branch_id}|{target_date.isoformat()}", BULK_CANCEL_MANAGER_ID
+            ),
+        )
+        assert "Недостаточно прав или филиал недоступен." in texts(forged_ok_calls)
+
+        async with session_factory() as session:
+            appt = await session.get(Appointment, tz_branch["appt_id"])
+            assert appt.status == AppointmentStatus.CONFIRMED
+    finally:
+        async with session_factory() as session:
+            await session.execute(
+                delete(StaffMember).where(StaffMember.telegram_id == BULK_CANCEL_MANAGER_ID)
+            )
+            await session.commit()
+
+
+async def test_bulk_cancel_confirmation_cannot_be_replayed_against_another_branch(
+    dispatcher, mocked_bot, session_factory, tenant_id, shop, tz_branch, staff_pair
+):
+    """Кнопка подтверждения несёт branch_id внутри себя (не из FSM state) —
+    даже если сотрудник потом «заглянул» в другой филиал, старая кнопка
+    продолжает относиться ровно к тому филиалу, для которого была показана."""
+    barber_id, service_id, shop_branch_id = shop
+    target_date = tz_branch["target_date"]
+    # Запись в обычном филиале shop на ту же календарную дату (по его tz).
+    async with session_factory() as session:
+        client = await session.scalar(select(User).where(User.telegram_id == 990_301_555))
+        if client is None:
+            client = User(tenant_id=tenant_id, telegram_id=990_301_555, full_name="Shop client")
+            session.add(client)
+            await session.flush()
+        branch = await session.get(Branch, shop_branch_id)
+        starts_at = combine_local(target_date, time(12, 0), branch.tz)
+        shop_appt = Appointment(
+            tenant_id=tenant_id, branch_id=shop_branch_id,
+            user_id=client.id, barber_id=barber_id, service_id=service_id,
+            starts_at=starts_at, ends_at=starts_at + timedelta(minutes=30),
+            status=AppointmentStatus.CONFIRMED, price=Decimal("100"), duration_minutes=30,
+        )
+        session.add(shop_appt)
+        await session.commit()
+        shop_appt_id = shop_appt.id
+
+    try:
+        branch_id = tz_branch["branch_id"]
+        await feed(dispatcher, mocked_bot, make_callback(f"ad:bcx_branch:{branch_id}", STAFF_OWNER_ID))
+        day_button = button(mocked_bot, "ad:bcx_conf:")
+        await feed(dispatcher, mocked_bot, make_callback(day_button, STAFF_OWNER_ID))
+        old_confirm_button = button(mocked_bot, "ad:bcx_ok:")
+        assert old_confirm_button == f"ad:bcx_ok:{branch_id}|{target_date.isoformat()}"
+
+        # Сотрудник «отвлёкся» — заглянул в другой филиал (но ничего там не подтверждал).
+        await feed(
+            dispatcher, mocked_bot, make_callback(f"ad:bcx_branch:{shop_branch_id}", STAFF_OWNER_ID)
+        )
+
+        # Возвращается к старой (уже показанной) кнопке подтверждения tz_branch.
+        calls = await feed(dispatcher, mocked_bot, make_callback(old_confirm_button, STAFF_OWNER_ID))
+        assert "Отменено 1" in texts(calls)
+
+        async with session_factory() as session:
+            tz_appt = await session.get(Appointment, tz_branch["appt_id"])
+            reloaded_shop_appt = await session.get(Appointment, shop_appt_id)
+        assert tz_appt.status == AppointmentStatus.CANCELLED
+        assert reloaded_shop_appt.status == AppointmentStatus.CONFIRMED
+    finally:
+        async with session_factory() as session:
+            await session.execute(delete(Appointment).where(Appointment.id == shop_appt_id))
+            await session.execute(delete(User).where(User.id == client.id))
+            await session.commit()
+
+
+# --- M-4: VIEW_CUSTOMERS RBAC reconciliation (Phase 9B) ---------------------
+RECEPTIONIST_ID = 990_600_001
+
+
+@pytest.fixture
+async def receptionist(session_factory, tenant_id):
+    async with session_factory() as session:
+        staff = await StaffRepository(session, tenant_id).create(
+            telegram_id=RECEPTIONIST_ID, role=Role.RECEPTIONIST
+        )
+        await session.commit()
+        staff_id = staff.id
+    yield staff_id
+    async with session_factory() as session:
+        await session.execute(delete(StaffMember).where(StaffMember.id == staff_id))
+        await session.commit()
+
+
+async def test_receptionist_has_view_customers_can_open_client_list(
+    dispatcher, mocked_bot, shop, receptionist
+):
+    """Пункт 1: роль с VIEW_CUSTOMERS (но без VIEW_ANALYTICS) теперь
+    реально открывает список клиентов — раньше блокировалась router-level
+    VIEW_ANALYTICS-фильтром (см. Phase 9B §M-4)."""
+    calls = await feed(dispatcher, mocked_bot, make_callback("ad:clients:0", RECEPTIONIST_ID))
+    assert calls != [("AnswerCallbackQuery", "Недостаточно прав.")]
+
+
+async def test_stranger_without_view_customers_cannot_open_client_list(
+    dispatcher, mocked_bot, shop
+):
+    """Пункт 2: без VIEW_CUSTOMERS (и без super_admin) экран по-прежнему
+    закрыт."""
+    calls = await feed(dispatcher, mocked_bot, make_callback("ad:clients:0", STRANGER_ID))
+    assert calls == [("AnswerCallbackQuery", "Недостаточно прав.")]
+
+
+async def test_receptionist_view_customers_does_not_grant_csv_export(
+    dispatcher, mocked_bot, shop, receptionist
+):
+    """Пункт 3: VIEW_CUSTOMERS не расширяет MANAGE_CUSTOMERS — экспорт CSV
+    (чувствительная массовая выгрузка) остаётся недоступен той же роли,
+    которая уже может открыть список клиентов."""
+    calls = await feed(dispatcher, mocked_bot, make_callback("ad:export:", RECEPTIONIST_ID))
+    assert calls == [("AnswerCallbackQuery", "Недостаточно прав для экспорта.")]
+
+
+async def test_receptionist_view_customers_does_not_grant_stats(
+    dispatcher, mocked_bot, shop, receptionist
+):
+    """VIEW_CUSTOMERS != VIEW_ANALYTICS — статистика (agregированная бизнес-
+    аналитика) остаётся отдельным правом, RECEPTIONIST его не имеет."""
+    calls = await feed(dispatcher, mocked_bot, make_callback("ad:stats:", RECEPTIONIST_ID))
+    assert calls == [("AnswerCallbackQuery", "Недостаточно прав.")]

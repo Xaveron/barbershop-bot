@@ -67,6 +67,7 @@ def make_callback(user_id: int) -> CallbackQuery:
                     Permission.MANAGE_SCHEDULE,
                     Permission.MANAGE_BOOKINGS,
                     Permission.MANAGE_CUSTOMERS,
+                    Permission.VIEW_CUSTOMERS,
                     Permission.VIEW_ANALYTICS,
                 }
             ),

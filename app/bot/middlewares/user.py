@@ -11,9 +11,10 @@ from aiogram.types import TelegramObject
 from aiogram.types import User as TelegramUser
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.i18n import normalize_language
+from app.bot.i18n import FALLBACK_LANGUAGE, normalize_language
 from app.config import Settings
 from app.database.repositories import UserRepository
+from app.services.locale import initial_customer_language, resolve_customer_locale
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +40,16 @@ class UserContextMiddleware(BaseMiddleware):
         # Финальное значение — за StaffContextMiddleware (учитывает staff и
         # платформенного оператора); здесь только безопасный дефолт.
         data["is_admin"] = False
+        # tenant_default_language уже резолвлен BotIdentityMiddleware (один
+        # запрос на апдейт, см. Phase 9E §6) — settings.default_language
+        # здесь больше не участвует: он процесс-wide и не привязан к
+        # конкретному арендатору (см. Phase 9E §15).
+        tenant_default_language = data.get("tenant_default_language", FALLBACK_LANGUAGE)
         # Язык до обращения к БД — он нужен даже там, где пользователя нет
         # (групповые чаты, троттлинг, ошибки).
         data["lang"] = normalize_language(
             telegram_user.language_code if telegram_user else None,
-            self.settings.default_language,
+            tenant_default_language,
         )
 
         if (
@@ -57,14 +63,15 @@ class UserContextMiddleware(BaseMiddleware):
                 telegram_id=telegram_user.id,
                 full_name=telegram_user.full_name[:255],
                 username=telegram_user.username,
-                language_code=normalize_language(
-                    telegram_user.language_code, self.settings.default_language
+                # Только для СОЗДАНИЯ строки — get_or_create не трогает
+                # language_code существующего User (см. app/services/locale.py
+                # и app/database/repositories/user.py::get_or_create).
+                language_code=initial_customer_language(
+                    telegram_user.language_code, tenant_default_language
                 ),
             )
             await session.commit()
             data["user"] = user
-            data["lang"] = normalize_language(
-                user.language_code, self.settings.default_language
-            )
+            data["lang"] = resolve_customer_locale(user, tenant_default_language)
 
         return await handler(event, data)

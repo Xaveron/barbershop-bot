@@ -23,6 +23,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.billing_ui import describe_billing_error
 from app.bot.i18n import t
 from app.bot.keyboards.callbacks import OnbCB
 from app.bot.keyboards.client import main_menu_kb
@@ -38,7 +39,9 @@ from app.database.repositories import (
     TenantRepository,
 )
 from app.services.authorization import AuthorizationError, AuthorizationService
+from app.services.billing import BillingError
 from app.services.onboarding import TenantOnboardingService
+from app.services.provisioning import BranchProvisioningService
 from app.utils.text import esc
 from app.utils.validators import (
     ValidationError,
@@ -237,9 +240,19 @@ async def set_branch_currency(
             return
 
     data = await state.get_data()
-    branch = await BranchRepository(session, tenant_id).create(
-        name=data["branch_name"], timezone=data.get("branch_timezone"), currency=currency
-    )
+    # BranchProvisioningService, а не голый BranchRepository (см. Phase 9B
+    # §M-5): единая точка проверки MAX_BRANCHES перед созданием — раньше
+    # первый филиал арендатора создавался в обход этой проверки, полагаясь
+    # на то, что у всех сегодняшних тарифов лимит >= 1 (см.
+    # docs/BILLING_DESIGN.md §Enforcement).
+    try:
+        branch = await BranchProvisioningService(session, tenant_id).create_branch(
+            name=data["branch_name"], timezone=data.get("branch_timezone"), currency=currency
+        )
+    except BillingError as exc:
+        await session.rollback()
+        await message.answer(f"⚠️ {describe_billing_error(exc, lang)}")
+        return
     await session.commit()
     logger.info("Онбординг: создан первый филиал %s (арендатор %s)", branch.id, tenant_id)
     await _render_next_step(message, state, session, settings, tenant_id, lang)

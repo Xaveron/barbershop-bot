@@ -52,13 +52,24 @@ class ServiceRepository(TenantScopedRepository):
         )
         return list(await self.session.scalars(stmt))
 
-    async def list_all(self) -> list[Service]:
+    async def list_all(self, *, limit: int | None = None, offset: int = 0) -> list[Service]:
+        """limit=None — полный список; limit задан — одна страница
+        admin-списка (см. Phase 9C §M-6). id как tie-breaker для стабильного
+        порядка между страницами."""
         stmt = (
             select(Service)
             .where(Service.tenant_id == self.tenant_id)
-            .order_by(Service.is_active.desc(), Service.sort_order, Service.name)
+            .order_by(Service.is_active.desc(), Service.sort_order, Service.name, Service.id)
         )
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
         return list(await self.session.scalars(stmt))
+
+    async def count_all(self) -> int:
+        stmt = select(func.count()).select_from(Service).where(
+            Service.tenant_id == self.tenant_id
+        )
+        return await self.session.scalar(stmt) or 0
 
     async def create(
         self,

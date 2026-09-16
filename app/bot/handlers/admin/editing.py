@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.handlers.admin.barbers import barber_card
 from app.bot.handlers.admin.branches import branch_card
 from app.bot.handlers.admin.services import service_card
+from app.bot.i18n import t
 from app.bot.states import AdminFieldSG
 from app.bot.utils import parse_uuid
 from app.database.models import Permission, StaffMember
@@ -40,6 +41,7 @@ async def apply_field_edit(
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
     is_super_admin: bool,
+    staff_lang: str,
 ) -> None:
     data = await state.get_data()
     entity = data.get("entity")
@@ -49,7 +51,7 @@ async def apply_field_edit(
 
     if entity not in {"service", "barber", "branch"} or field is None or entity_id is None:
         await state.clear()
-        await message.answer("Сессия редактирования устарела. Откройте /admin заново.")
+        await message.answer(t("admin.editing.session_expired", staff_lang))
         return
 
     # Защита на будущее: сегодня в это состояние можно попасть, только уже
@@ -66,11 +68,11 @@ async def apply_field_edit(
         AuthorizationService.require(staff, permission, is_super_admin=is_super_admin)
     except AuthorizationError:
         await state.clear()
-        await message.answer("Недостаточно прав.")
+        await message.answer(t("common.no_rights", staff_lang))
         return
 
     try:
-        value = _parse_value(field, raw)
+        value = _parse_value(field, raw, staff_lang)
     except ValidationError as exc:
         await message.answer(f"⚠️ {esc(exc)}")
         return
@@ -79,37 +81,37 @@ async def apply_field_edit(
         service = await ServiceRepository(session, tenant_id).get(entity_id)
         if service is None:
             await state.clear()
-            await message.answer("Услуга не найдена.")
+            await message.answer(t("admin.service.not_found", staff_lang))
             return
         setattr(service, _COLUMNS[field], value)
         await state.clear()
-        if not await _commit(session, message):
+        if not await _commit(session, message, staff_lang):
             return
-        text, markup = service_card(service)
+        text, markup = service_card(service, staff_lang)
     elif entity == "barber":
         barber = await BarberRepository(session, tenant_id).get(entity_id)
         if barber is None:
             await state.clear()
-            await message.answer("Барбер не найден.")
+            await message.answer(t("admin.barber.not_found", staff_lang))
             return
         setattr(barber, _COLUMNS[field], value)
         await state.clear()
-        if not await _commit(session, message):
+        if not await _commit(session, message, staff_lang):
             return
-        text, markup = await barber_card(barber, session, tenant_id)
+        text, markup = await barber_card(barber, session, tenant_id, staff_lang)
     else:
         branch = await BranchRepository(session, tenant_id).get(entity_id)
         if branch is None:
             await state.clear()
-            await message.answer("Филиал не найден.")
+            await message.answer(t("admin.branch.not_found", staff_lang))
             return
         setattr(branch, _COLUMNS[field], value)
         await state.clear()
-        if not await _commit(session, message):
+        if not await _commit(session, message, staff_lang):
             return
-        text, markup = branch_card(branch)
+        text, markup = branch_card(branch, staff_lang)
 
-    await message.answer("✅ Сохранено\n\n" + text, reply_markup=markup)
+    await message.answer(t("admin.editing.saved", staff_lang) + text, reply_markup=markup)
 
 
 _COLUMNS = {
@@ -121,24 +123,24 @@ _COLUMNS = {
 }
 
 
-def _parse_value(field: str, raw: str) -> str | int | Decimal | None:
+def _parse_value(field: str, raw: str, lang: str) -> str | int | Decimal | None:
     if field == "name":
-        return validate_name(raw)
+        return validate_name(raw, lang=lang)
     if field == "duration":
-        return validate_duration(raw)
+        return validate_duration(raw, lang=lang)
     if field == "price":
-        return validate_price(raw)
+        return validate_price(raw, lang=lang)
     if field in ("description", "address"):
-        return validate_description(raw)
-    raise ValidationError("Неизвестное поле.")
+        return validate_description(raw, lang=lang)
+    raise ValidationError(t("admin.editing.unknown_field", lang))
 
 
-async def _commit(session: AsyncSession, message: Message) -> bool:
+async def _commit(session: AsyncSession, message: Message, lang: str) -> bool:
     try:
         await session.commit()
     except Exception:
         await session.rollback()
         logger.exception("Не удалось сохранить изменение")
-        await message.answer("⚠️ Не удалось сохранить: возможно, значение конфликтует с другим.")
+        await message.answer(t("admin.editing.save_failed", lang))
         return False
     return True

@@ -4,7 +4,7 @@ import enum
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, Boolean, Enum, ForeignKey, UniqueConstraint, Uuid, true
+from sqlalchemy import BigInteger, Boolean, Enum, ForeignKey, String, UniqueConstraint, Uuid, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
@@ -46,7 +46,9 @@ class Permission(enum.StrEnum):
 # Статическая политика: как NAMING_CONVENTION в app/database/base.py, это
 # константа кода, а не настраиваемая через БД сущность — в приложении нет
 # прецедента для DB-driven policy. См. docs/RBAC_DESIGN.md §5 за обоснованием
-# построчно.
+# построчно. MANAGER получил VIEW_CUSTOMERS в Phase 9B (§M-4): он уже имел
+# MANAGE_CUSTOMERS — держать "может управлять, но не может даже посмотреть"
+# было внутренней нестыковкой роли, а не осознанным ограничением.
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
     Role.TENANT_OWNER: frozenset(Permission),
     Role.TENANT_ADMIN: frozenset(Permission) - {Permission.MANAGE_SUBSCRIPTION},
@@ -57,6 +59,7 @@ ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {
             Permission.MANAGE_SCHEDULE,
             Permission.MANAGE_BOOKINGS,
             Permission.MANAGE_CUSTOMERS,
+            Permission.VIEW_CUSTOMERS,
             Permission.VIEW_ANALYTICS,
         }
     ),
@@ -93,5 +96,10 @@ class StaffMember(TenantScopedMixin, UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
     )
+    # NULL = наследует Tenant.default_language (см. app/services/locale.py) —
+    # явное персональное предпочтение, а не копия дефолта арендатора на
+    # момент создания строки (Phase 9E §7): не бэкфиллится для существующих
+    # сотрудников и не выставляется автоматически при создании новых.
+    language: Mapped[str | None] = mapped_column(String(8))
 
     barber: Mapped[Barber | None] = relationship()

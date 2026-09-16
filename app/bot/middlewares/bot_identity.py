@@ -24,7 +24,9 @@ from aiogram import BaseMiddleware, Bot
 from aiogram.types import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.i18n import FALLBACK_LANGUAGE
 from app.services.bot_identity import BotIdentityResolver
+from app.services.locale import get_tenant_default_language
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,10 @@ class BotIdentityMiddleware(BaseMiddleware):
         if self.platform_bot_id is not None and bot.id == self.platform_bot_id:
             data["is_platform_bot"] = True
             data["tenant_id"] = None
+            # Платформенный бот не принадлежит ни одному арендатору — дефолт
+            # языка тут ровно FALLBACK_LANGUAGE, никакой Tenant не читаем
+            # (см. Phase 9E §17: платформенная локализация — вне этой фазы).
+            data["tenant_default_language"] = FALLBACK_LANGUAGE
             return await handler(event, data)
 
         data["is_platform_bot"] = False
@@ -57,4 +63,11 @@ class BotIdentityMiddleware(BaseMiddleware):
             return None
 
         data["tenant_id"] = identity.tenant_id
+        # Резолвится один раз на апдейт здесь (а не отдельно в
+        # UserContextMiddleware и StaffContextMiddleware) — единственный
+        # запрос Tenant.default_language, переиспользуемый обеими цепочками
+        # резолюции языка (см. app/services/locale.py, Phase 9E §6).
+        data["tenant_default_language"] = await get_tenant_default_language(
+            session, identity.tenant_id
+        )
         return await handler(event, data)

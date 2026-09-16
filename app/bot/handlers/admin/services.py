@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.billing_ui import describe_billing_error
+from app.bot.i18n import t
 from app.bot.keyboards.admin import (
     admin_service_branches_kb,
     admin_service_kb,
@@ -24,9 +25,9 @@ from app.bot.middlewares.permissions import RequirePermission
 from app.bot.states import AdminFieldSG, AdminServiceSG
 from app.bot.utils import alert, edit_message, parse_uuid
 from app.config import Settings
-from app.database.models import Permission, Service
+from app.database.models import LimitKey, Permission, Service
 from app.database.repositories import BranchRepository, ServiceRepository
-from app.services.billing import BillingError
+from app.services.billing import BillingError, LimitService
 from app.services.provisioning import ServiceProvisioningService
 from app.utils.dt import format_duration
 from app.utils.text import esc, money
@@ -43,40 +44,63 @@ router = Router(name="admin-services")
 router.message.filter(RequirePermission(Permission.MANAGE_SERVICES))
 router.callback_query.filter(RequirePermission(Permission.MANAGE_SERVICES))
 
+PAGE_SIZE = 8
 
-def service_card(service: Service) -> tuple[str, InlineKeyboardMarkup]:
-    text = (
-        f"💇 <b>{esc(service.name)}</b>\n\n"
-        f"💰 Цена: {money(service.price, service.currency)}\n"
-        f"⏱ Длительность: {format_duration(service.duration_minutes)}\n"
-        f"📝 Описание: {esc(service.description or '—')}\n"
-        f"👁 Статус: {'активна' if service.is_active else 'скрыта'}"
+
+def service_card(service: Service, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    status = (
+        t("admin.service.status_active", lang)
+        if service.is_active
+        else t("admin.service.status_hidden", lang)
     )
-    return text, admin_service_kb(service)
+    text = t(
+        "admin.service.card",
+        lang,
+        name=esc(service.name),
+        price=money(service.price, service.currency),
+        duration=format_duration(service.duration_minutes, lang),
+        description=esc(service.description or "—"),
+        status=status,
+    )
+    return text, admin_service_kb(service, lang)
 
 
 async def services_list(
-    session: AsyncSession, tenant_id: uuid.UUID
+    session: AsyncSession, tenant_id: uuid.UUID, lang: str, page: int = 0
 ) -> tuple[str, InlineKeyboardMarkup]:
-    services = await ServiceRepository(session, tenant_id).list_all()
+    """Пагинированный admin-список (см. Phase 9C §M-6) — отдельно от
+    ServiceRepository.list_active(), которым продолжают пользоваться
+    operational-флоу бронирования: им нужны ВСЕ активные услуги разом."""
+    repository = ServiceRepository(session, tenant_id)
+    total = await repository.count_all()
+    services = await repository.list_all(limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+    if not services and page > 0:
+        return await services_list(session, tenant_id, lang, 0)
     if not services:
-        return "💇 Услуг пока нет. Добавьте первую.", admin_services_kb(services)
-    lines = ["💇 <b>Услуги</b>\n"]
+        return t("admin.services.empty", lang), admin_services_kb(services, lang, page, False)
+    lines = [t("admin.services.list_title", lang, total=total) + "\n"]
     for service in services:
         mark = "✅" if service.is_active else "🚫"
         lines.append(
             f"{mark} {esc(service.name)} — {money(service.price, service.currency)}, "
-            f"{format_duration(service.duration_minutes)}"
+            f"{format_duration(service.duration_minutes, lang)}"
         )
-    return "\n".join(lines), admin_services_kb(services)
+    has_next = (page + 1) * PAGE_SIZE < total
+    return "\n".join(lines), admin_services_kb(services, lang, page, has_next)
 
 
 @router.callback_query(AdmCB.filter(F.action == "services"))
 async def show_services(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     await state.clear()
-    text, markup = await services_list(session, tenant_id)
+    page = int(callback_data.arg) if callback_data.arg.isdigit() else 0
+    text, markup = await services_list(session, tenant_id, staff_lang, page)
     await edit_message(callback, text, markup)
     await callback.answer()
 
@@ -88,13 +112,14 @@ async def show_service(
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     await state.clear()
     service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
-        await alert(callback, "Услуга не найдена.")
+        await alert(callback, t("admin.service.not_found", staff_lang))
         return
-    text, markup = service_card(service)
+    text, markup = service_card(service, staff_lang)
     await edit_message(callback, text, markup)
     await callback.answer()
 
@@ -106,19 +131,24 @@ async def show_service_branches(
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     await state.clear()
     service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
-        await alert(callback, "Услуга не найдена.")
+        await alert(callback, t("admin.service.not_found", staff_lang))
         return
     await state.update_data(service_id=str(service.id))
-    await _render_service_branches(callback, session, tenant_id, service)
+    await _render_service_branches(callback, session, tenant_id, service, staff_lang)
     await callback.answer()
 
 
 async def _render_service_branches(
-    callback: CallbackQuery, session: AsyncSession, tenant_id: uuid.UUID, service: Service
+    callback: CallbackQuery,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    service: Service,
+    lang: str,
 ) -> None:
     branch_repo = BranchRepository(session, tenant_id)
     branches = await branch_repo.list_active()
@@ -129,9 +159,9 @@ async def _render_service_branches(
             service_id=service.id, branch_id=branch.id
         )
     }
-    text = f"📍 <b>{esc(service.name)}</b>\n\nДоступность по филиалам (нажмите, чтобы переключить):"
+    text = t("admin.service.branches_prompt", lang, name=esc(service.name))
     await edit_message(
-        callback, text, admin_service_branches_kb(service, branches, available_ids)
+        callback, text, admin_service_branches_kb(service, branches, available_ids, lang)
     )
 
 
@@ -142,16 +172,17 @@ async def toggle_service_branch(
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     data = await state.get_data()
     service_id = parse_uuid(data.get("service_id", ""))
     branch_id = parse_uuid(callback_data.arg)
     if service_id is None or branch_id is None:
-        await alert(callback, "Сессия устарела. Откройте /admin заново.")
+        await alert(callback, t("admin.errors.session_expired", staff_lang))
         return
     service = await _get_service(str(service_id), session, tenant_id)
     if service is None:
-        await alert(callback, "Услуга не найдена.")
+        await alert(callback, t("admin.service.not_found", staff_lang))
         return
 
     branch_repo = BranchRepository(session, tenant_id)
@@ -162,61 +193,60 @@ async def toggle_service_branch(
         service_id=service.id, branch_id=branch_id, is_active=not currently_available
     )
     if link is None:
-        await alert(callback, "Не удалось изменить доступность.")
+        await alert(callback, t("admin.service.availability_failed", staff_lang))
         return
     await session.commit()
-    await _render_service_branches(callback, session, tenant_id, service)
-    await callback.answer("Сохранено")
+    await _render_service_branches(callback, session, tenant_id, service, staff_lang)
+    await callback.answer(t("admin.errors.saved", staff_lang))
 
 
 # --- Создание услуги --------------------------------------------------------
 @router.callback_query(AdmCB.filter(F.action == "svc_add"))
-async def add_service_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def add_service_start(callback: CallbackQuery, state: FSMContext, staff_lang: str) -> None:
     await state.clear()
     await state.set_state(AdminServiceSG.name)
     await edit_message(
         callback,
-        "➕ <b>Новая услуга</b>\n\nШаг 1/4. Отправьте название услуги.\n"
-        "Для отмены: /cancel",
-        back_to_admin_kb("services"),
+        t("admin.service.add_title", staff_lang),
+        back_to_admin_kb(staff_lang, "services"),
     )
     await callback.answer()
 
 
 @router.message(AdminServiceSG.name)
-async def add_service_name(message: Message, state: FSMContext) -> None:
+async def add_service_name(message: Message, state: FSMContext, staff_lang: str) -> None:
     try:
-        name = validate_name(message.text or "")
+        name = validate_name(message.text or "", lang=staff_lang)
     except ValidationError as exc:
         await message.answer(f"⚠️ {esc(exc)}")
         return
     await state.update_data(name=name)
     await state.set_state(AdminServiceSG.duration)
-    await message.answer("Шаг 2/4. Длительность в минутах (кратно 5), например: 45")
+    await message.answer(t("admin.service.add_step2", staff_lang))
 
 
 @router.message(AdminServiceSG.duration)
-async def add_service_duration(message: Message, state: FSMContext) -> None:
+async def add_service_duration(message: Message, state: FSMContext, staff_lang: str) -> None:
     try:
-        duration = validate_duration(message.text or "")
+        duration = validate_duration(message.text or "", lang=staff_lang)
     except ValidationError as exc:
         await message.answer(f"⚠️ {esc(exc)}")
         return
     await state.update_data(duration=duration)
     await state.set_state(AdminServiceSG.price)
-    await message.answer("Шаг 3/4. Цена, например: 250")
+    await message.answer(t("admin.service.add_step3", staff_lang))
 
 
 @router.message(AdminServiceSG.price)
-async def add_service_price(message: Message, state: FSMContext) -> None:
+async def add_service_price(message: Message, state: FSMContext, staff_lang: str) -> None:
     try:
-        price = validate_price(message.text or "")
+        price = validate_price(message.text or "", lang=staff_lang)
     except ValidationError as exc:
         await message.answer(f"⚠️ {esc(exc)}")
         return
     await state.update_data(price=str(price))
     await state.set_state(AdminServiceSG.description)
-    await message.answer("Шаг 4/4. Описание (или «-», чтобы пропустить)")
+    await message.answer(t("admin.service.add_step4", staff_lang))
 
 
 @router.message(AdminServiceSG.description)
@@ -226,10 +256,10 @@ async def add_service_description(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
-    lang: str,
+    staff_lang: str,
 ) -> None:
     try:
-        description = validate_description(message.text or "")
+        description = validate_description(message.text or "", lang=staff_lang)
     except ValidationError as exc:
         await message.answer(f"⚠️ {esc(exc)}")
         return
@@ -248,94 +278,122 @@ async def add_service_description(
         await session.commit()
     except BillingError as exc:
         await session.rollback()
-        await message.answer(f"⚠️ {describe_billing_error(exc, lang)}")
+        await message.answer(f"⚠️ {describe_billing_error(exc, staff_lang)}")
         return
     except Exception:
         await session.rollback()
         logger.exception("Не удалось создать услугу")
-        await message.answer("⚠️ Не удалось создать услугу. Возможно, такое название уже есть.")
+        await message.answer(t("admin.service.create_failed", staff_lang))
         return
 
-    text, markup = service_card(service)
-    await message.answer("✅ Услуга создана\n\n" + text, reply_markup=markup)
+    text, markup = service_card(service, staff_lang)
+    await message.answer(t("admin.service.created", staff_lang) + text, reply_markup=markup)
 
 
 # --- Редактирование ---------------------------------------------------------
-_FIELD_PROMPTS = {
-    "svc_name": ("name", "Отправьте новое название услуги."),
-    "svc_dur": ("duration", "Отправьте новую длительность в минутах (кратно 5)."),
-    "svc_price": ("price", "Отправьте новую цену, например: 300"),
-    "svc_desc": ("description", "Отправьте новое описание (или «-», чтобы очистить)."),
+_FIELD_PROMPT_KEYS = {
+    "svc_name": ("name", "admin.service.prompt_name"),
+    "svc_dur": ("duration", "admin.service.prompt_duration"),
+    "svc_price": ("price", "admin.service.prompt_price"),
+    "svc_desc": ("description", "admin.service.prompt_description"),
 }
 
 
-@router.callback_query(AdmCB.filter(F.action.in_(set(_FIELD_PROMPTS))))
+@router.callback_query(AdmCB.filter(F.action.in_(set(_FIELD_PROMPT_KEYS))))
 async def edit_service_field(
     callback: CallbackQuery,
     callback_data: AdmCB,
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
-        await alert(callback, "Услуга не найдена.")
+        await alert(callback, t("admin.service.not_found", staff_lang))
         return
-    field, prompt = _FIELD_PROMPTS[callback_data.action]
+    field, prompt_key = _FIELD_PROMPT_KEYS[callback_data.action]
     await state.set_state(AdminFieldSG.value)
     await state.update_data(entity="service", field=field, entity_id=str(service.id))
     await edit_message(
         callback,
-        f"✏️ {esc(service.name)}\n\n{prompt}\n\nДля отмены: /cancel",
-        back_to_admin_kb("svc", str(service.id)),
+        t(
+            "admin.common.edit_field_prompt",
+            staff_lang,
+            name=esc(service.name),
+            prompt=t(prompt_key, staff_lang),
+            cancel_hint=t("admin.common.cancel_hint", staff_lang),
+        ),
+        back_to_admin_kb(staff_lang, "svc", str(service.id)),
     )
     await callback.answer()
 
 
 @router.callback_query(AdmCB.filter(F.action == "svc_toggle"))
 async def toggle_service(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
-        await alert(callback, "Услуга не найдена.")
+        await alert(callback, t("admin.service.not_found", staff_lang))
         return
+    if not service.is_active:
+        # Реактивация — на один активный ресурс больше, проверяется тем же
+        # LimitService.assert_can_create, что и создание новой услуги (см.
+        # Phase 9B §M-2): нельзя обойти MAX_SERVICES циклом скрыть→создать→
+        # показать.
+        try:
+            await LimitService(session, tenant_id).assert_can_create(LimitKey.MAX_SERVICES)
+        except BillingError as exc:
+            await session.rollback()
+            await alert(callback, describe_billing_error(exc, staff_lang))
+            return
     service.is_active = not service.is_active
     await session.commit()
-    text, markup = service_card(service)
+    text, markup = service_card(service, staff_lang)
     await edit_message(callback, text, markup)
-    await callback.answer("Статус обновлён")
+    await callback.answer(t("admin.common.status_updated", staff_lang))
 
 
 @router.callback_query(AdmCB.filter(F.action == "svc_del"))
 async def ask_delete_service(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
-        await alert(callback, "Услуга не найдена.")
+        await alert(callback, t("admin.service.not_found", staff_lang))
         return
     await edit_message(
         callback,
-        f"🗑 Удалить услугу «{esc(service.name)}»?\n\n"
-        "Если по услуге есть активные записи, удаление будет заблокировано — "
-        "используйте «Скрыть».",
-        confirm_delete_kb("svc_del_ok", str(service.id), "svc"),
+        t("admin.service.delete_confirm", staff_lang, name=esc(service.name)),
+        confirm_delete_kb("svc_del_ok", str(service.id), "svc", staff_lang),
     )
     await callback.answer()
 
 
 @router.callback_query(AdmCB.filter(F.action == "svc_del_ok"))
 async def delete_service(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     service = await _get_service(callback_data.arg, session, tenant_id)
     if service is None:
-        await alert(callback, "Услуга не найдена.")
+        await alert(callback, t("admin.service.not_found", staff_lang))
         return
     repository = ServiceRepository(session, tenant_id)
     if await repository.has_appointments(service.id):
-        await alert(callback, "По услуге есть активные записи — можно только скрыть её.")
+        await alert(callback, t("admin.service.delete_blocked", staff_lang))
         return
     try:
         await repository.delete(service)
@@ -343,11 +401,11 @@ async def delete_service(
     except Exception:
         await session.rollback()
         logger.exception("Не удалось удалить услугу")
-        await alert(callback, "Не удалось удалить: услуга используется в истории записей.")
+        await alert(callback, t("admin.service.delete_failed", staff_lang))
         return
-    text, markup = await services_list(session, tenant_id)
-    await edit_message(callback, "🗑 Услуга удалена\n\n" + text, markup)
-    await callback.answer("Удалено")
+    text, markup = await services_list(session, tenant_id, staff_lang)
+    await edit_message(callback, t("admin.service.deleted", staff_lang) + text, markup)
+    await callback.answer(t("admin.common.deleted_toast", staff_lang))
 
 
 async def _get_service(

@@ -153,10 +153,10 @@ async def choose_language(
     session: AsyncSession,
     tenant_id: uuid.UUID,
     user: User,
-    settings: Settings,
     is_admin: bool,
+    tenant_default_language: str,
 ) -> None:
-    chosen = normalize_language(callback_data.code, settings.default_language)
+    chosen = normalize_language(callback_data.code, tenant_default_language)
     if callback_data.code not in LANGUAGES:
         logger.info("Неизвестный код языка в callback: %s", callback_data.code)
     await UserRepository(session, tenant_id).set_language(user, chosen)

@@ -72,13 +72,23 @@ class BarberRepository(TenantScopedRepository):
         )
         return list(await self.session.scalars(stmt))
 
-    async def list_all(self) -> list[Barber]:
+    async def list_all(self, *, limit: int | None = None, offset: int = 0) -> list[Barber]:
+        """limit=None — полный список (для operational-пикеров типа выбора
+        барбера для графика/исключения — им нужны ВСЕ барберы, не одна
+        страница); limit задан — одна страница admin-списка (см. Phase 9C
+        §M-6). id как tie-breaker гарантирует стабильный порядок."""
         stmt = (
             select(Barber)
             .where(Barber.tenant_id == self.tenant_id)
-            .order_by(Barber.is_active.desc(), Barber.sort_order, Barber.name)
+            .order_by(Barber.is_active.desc(), Barber.sort_order, Barber.name, Barber.id)
         )
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
         return list(await self.session.scalars(stmt))
+
+    async def count_all(self) -> int:
+        stmt = select(func.count()).select_from(Barber).where(Barber.tenant_id == self.tenant_id)
+        return await self.session.scalar(stmt) or 0
 
     async def create(self, *, name: str, description: str | None = None) -> Barber:
         barber = Barber(tenant_id=self.tenant_id, name=name, description=description)

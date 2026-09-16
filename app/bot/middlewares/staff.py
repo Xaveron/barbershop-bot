@@ -11,8 +11,10 @@ from aiogram.types import TelegramObject
 from aiogram.types import User as TelegramUser
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.i18n import FALLBACK_LANGUAGE
 from app.config import Settings
 from app.database.repositories import StaffRepository
+from app.services.locale import resolve_staff_locale
 from app.services.platform_authorization import PlatformAuthorizationService
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,13 @@ class StaffContextMiddleware(BaseMiddleware):
             ).is_operator(telegram_user.id)
         data["staff"] = staff
         data["is_super_admin"] = is_super_admin
+        # Язык персонала (Phase 9E §6) — StaffMember.language -> Tenant.
+        # default_language -> FALLBACK_LANGUAGE, НИКОГДА не data["lang"]
+        # (тот резолвится из User.language_code клиента — см.
+        # UserContextMiddleware — разные оси персонажей, разные ключи).
+        data["staff_lang"] = resolve_staff_locale(
+            staff, data.get("tenant_default_language", FALLBACK_LANGUAGE)
+        )
 
         data["is_admin"] = (
             bool(data.get("is_admin"))

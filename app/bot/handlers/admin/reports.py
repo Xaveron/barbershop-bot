@@ -12,14 +12,18 @@ from aiogram.types import BufferedInputFile, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.billing_ui import describe_billing_error
+from app.bot.i18n import t
 from app.bot.keyboards.admin import back_to_admin_kb, clients_kb, export_periods_kb
 from app.bot.keyboards.callbacks import AdmCB
-from app.bot.middlewares.permissions import RequirePermission
 from app.bot.utils import alert, edit_message
 from app.config import Settings
 from app.database.models import Feature, Permission, StaffMember
 from app.database.repositories import UserRepository
-from app.services.authorization import AuthorizationError, AuthorizationService
+from app.services.authorization import (
+    AuthorizationError,
+    AuthorizationService,
+    resolve_accessible_branch_ids,
+)
 from app.services.billing import EntitlementService, FeatureNotAvailable
 from app.services.export import ExportService
 from app.services.stats import StatsService
@@ -28,8 +32,12 @@ from app.utils.text import esc, money
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin-reports")
-router.message.filter(RequirePermission(Permission.VIEW_ANALYTICS))
-router.callback_query.filter(RequirePermission(Permission.VIEW_ANALYTICS))
+# Нет общего router-level Permission-фильтра (см. Phase 9B §M-4): «Клиенты»
+# и «Статистика»/«Экспорт» защищены РАЗНЫМИ правами (VIEW_CUSTOMERS vs
+# VIEW_ANALYTICS/MANAGE_CUSTOMERS) — единого «минимального общего» права нет.
+# Базовый допуск «это вообще сотрудник арендатора» уже обеспечен IsStaff() на
+# уровне build_admin_router(); каждый хендлер здесь проверяет своё право
+# инлайн, тем же паттерном, что admin/staff.py.
 
 CLIENTS_PAGE_SIZE = 10
 MAX_EXPORT_DAYS = 3650
@@ -42,36 +50,48 @@ async def show_stats(
     session: AsyncSession,
     settings: Settings,
     tenant_id: uuid.UUID,
-    lang: str,
+    staff: StaffMember | None,
+    is_super_admin: bool,
+    staff_lang: str,
 ) -> None:
+    try:
+        AuthorizationService.require(
+            staff, Permission.VIEW_ANALYTICS, is_super_admin=is_super_admin
+        )
+    except AuthorizationError:
+        await alert(callback, t("common.no_rights", staff_lang))
+        return
     await state.clear()
     try:
         await EntitlementService(session, tenant_id).require_feature(Feature.ANALYTICS)
     except FeatureNotAvailable as exc:
-        await alert(callback, describe_billing_error(exc, lang))
+        await alert(callback, describe_billing_error(exc, staff_lang))
         return
-    stats = await StatsService(session, settings, tenant_id).collect()
+    branch_ids = await resolve_accessible_branch_ids(
+        session, tenant_id, staff, is_super_admin=is_super_admin
+    )
+    stats = await StatsService(session, settings, tenant_id).collect(branch_ids=branch_ids)
     lines = [
-        "📊 <b>Статистика</b>\n",
-        f"📅 Всего записей: <b>{stats.total_appointments}</b>",
-        f"⏭ Предстоящих: <b>{stats.upcoming_appointments}</b>",
-        f"📆 Сегодня: <b>{stats.today_appointments}</b>",
-        f"🗓 В этом месяце: <b>{stats.month_appointments}</b>",
-        f"🚫 Отменено за месяц: <b>{stats.cancelled_month}</b>",
-        f"👥 Клиентов: <b>{stats.clients}</b>",
+        t("admin.stats.title", staff_lang) + "\n",
+        t("admin.stats.total_appointments", staff_lang, value=stats.total_appointments),
+        t("admin.stats.upcoming", staff_lang, value=stats.upcoming_appointments),
+        t("admin.stats.today", staff_lang, value=stats.today_appointments),
+        t("admin.stats.this_month", staff_lang, value=stats.month_appointments),
+        t("admin.stats.cancelled_month", staff_lang, value=stats.cancelled_month),
+        t("admin.stats.clients", staff_lang, value=stats.clients),
         "",
-        f"💰 Выручка сегодня: <b>{money(stats.revenue_today)}</b>",
-        f"💰 Выручка за месяц: <b>{money(stats.revenue_month)}</b>",
+        t("admin.stats.revenue_today", staff_lang, value=money(stats.revenue_today)),
+        t("admin.stats.revenue_month", staff_lang, value=money(stats.revenue_month)),
     ]
     if stats.top_services:
-        lines.append("\n🔥 <b>Популярные услуги (месяц)</b>")
+        lines.append("\n" + t("admin.stats.top_services_header", staff_lang))
         for name, count, revenue in stats.top_services:
             lines.append(f"• {esc(name)}: {count} — {money(revenue)}")
     if stats.top_barbers:
-        lines.append("\n👨‍💈 <b>Барберы (месяц)</b>")
+        lines.append("\n" + t("admin.stats.top_barbers_header", staff_lang))
         for name, count, revenue in stats.top_barbers:
             lines.append(f"• {esc(name)}: {count} — {money(revenue)}")
-    await edit_message(callback, "\n".join(lines), back_to_admin_kb("menu"))
+    await edit_message(callback, "\n".join(lines), back_to_admin_kb(staff_lang, "menu"))
     await callback.answer()
 
 
@@ -82,37 +102,77 @@ async def show_clients(
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    staff: StaffMember | None,
+    is_super_admin: bool,
+    staff_lang: str,
 ) -> None:
+    # Список клиентов — отдельное от аналитики право (см. Phase 9B §M-4):
+    # RECEPTIONIST/BARBER имеют VIEW_CUSTOMERS, но не VIEW_ANALYTICS, и
+    # раньше вообще не могли открыть этот экран, хотя роль явно на это
+    # рассчитана (docs/RBAC_DESIGN.md).
+    try:
+        AuthorizationService.require(
+            staff, Permission.VIEW_CUSTOMERS, is_super_admin=is_super_admin
+        )
+    except AuthorizationError:
+        await alert(callback, t("common.no_rights", staff_lang))
+        return
     await state.clear()
     page = int(callback_data.arg) if callback_data.arg.isdigit() else 0
+    branch_ids = await resolve_accessible_branch_ids(
+        session, tenant_id, staff, is_super_admin=is_super_admin
+    )
     repository = UserRepository(session, tenant_id)
-    total = await repository.count()
+    total = await repository.count(branch_ids=branch_ids)
     rows = await repository.list_with_appointment_counts(
-        limit=CLIENTS_PAGE_SIZE, offset=page * CLIENTS_PAGE_SIZE
+        limit=CLIENTS_PAGE_SIZE, offset=page * CLIENTS_PAGE_SIZE, branch_ids=branch_ids
     )
     if not rows:
-        await edit_message(callback, "👥 Клиентов пока нет.", back_to_admin_kb("menu"))
+        await edit_message(
+            callback, t("admin.clients.empty", staff_lang), back_to_admin_kb(staff_lang, "menu")
+        )
         await callback.answer()
         return
-    lines = [f"👥 <b>Клиенты</b> (всего {total})\n"]
+    lines = [t("admin.clients.list_title", staff_lang, total=total) + "\n"]
     for user, count in rows:
         blocked = " 🚫" if user.is_blocked else ""
         lines.append(
-            f"• {esc(user.display_name)} — {count} зап.{blocked}\n"
-            f"  <code>{user.telegram_id}</code>"
+            t(
+                "admin.clients.row",
+                staff_lang,
+                name=esc(user.display_name),
+                count=count,
+                blocked=blocked,
+                telegram_id=f"<code>{user.telegram_id}</code>",
+            )
         )
     has_next = (page + 1) * CLIENTS_PAGE_SIZE < total
-    await edit_message(callback, "\n".join(lines), clients_kb(page, has_next))
+    await edit_message(callback, "\n".join(lines), clients_kb(page, has_next, staff_lang))
     await callback.answer()
 
 
 @router.callback_query(AdmCB.filter(F.action == "export"))
-async def choose_export_period(callback: CallbackQuery, state: FSMContext) -> None:
+async def choose_export_period(
+    callback: CallbackQuery,
+    state: FSMContext,
+    staff: StaffMember | None,
+    is_super_admin: bool,
+    staff_lang: str,
+) -> None:
+    # Тот же MANAGE_CUSTOMERS, что и сам export_do (см. ниже) — не показываем
+    # выбор периода тому, кто всё равно будет отклонён на следующем шаге.
+    try:
+        AuthorizationService.require(
+            staff, Permission.MANAGE_CUSTOMERS, is_super_admin=is_super_admin
+        )
+    except AuthorizationError:
+        await alert(callback, t("admin.export.no_rights", staff_lang))
+        return
     await state.clear()
     await edit_message(
         callback,
-        "📥 <b>Экспорт записей в CSV</b>\n\nВыберите период:",
-        export_periods_kb(),
+        t("admin.export.title", staff_lang),
+        export_periods_kb(staff_lang),
     )
     await callback.answer()
 
@@ -126,41 +186,46 @@ async def export_csv(
     tenant_id: uuid.UUID,
     staff: StaffMember | None,
     is_super_admin: bool,
-    lang: str,
+    staff_lang: str,
 ) -> None:
-    # Доп. проверка сверх VIEW_ANALYTICS на уровне роутера: массовая выгрузка
-    # имён/телефонов клиентов в CSV чувствительнее просмотра сводки в чате —
-    # роль с одним VIEW_ANALYTICS (например MANAGER) не должна автоматически
-    # получать право на выгрузку персональных данных (см. docs/RBAC_DESIGN.md §5).
+    # Массовая выгрузка имён/телефонов клиентов в CSV чувствительнее
+    # просмотра сводки в чате — MANAGE_CUSTOMERS, не VIEW_ANALYTICS/
+    # VIEW_CUSTOMERS (см. Phase 9B §M-4: сегодня MANAGE_CUSTOMERS есть только
+    # у ролей, уже имеющих и VIEW_ANALYTICS, так что фактическое поведение
+    # экспорта не изменилось — просто больше не зависит от router-level
+    # фильтра, которого здесь больше нет).
     try:
         AuthorizationService.require(
             staff, Permission.MANAGE_CUSTOMERS, is_super_admin=is_super_admin
         )
     except AuthorizationError:
-        await alert(callback, "Недостаточно прав для экспорта.")
+        await alert(callback, t("admin.export.no_rights", staff_lang))
         return
     try:
         await EntitlementService(session, tenant_id).require_feature(Feature.CSV_EXPORT)
     except FeatureNotAvailable as exc:
-        await alert(callback, describe_billing_error(exc, lang))
+        await alert(callback, describe_billing_error(exc, staff_lang))
         return
 
     now = now_utc()
     if callback_data.arg == "all":
         start = now - timedelta(days=3650)
-        label = "все записи"
+        label = t("admin.export.period_all", staff_lang)
     elif callback_data.arg.isdigit():
         # Ограничиваем сверху: timedelta не переживёт подделанный аргумент вида 10**15.
         days = min(int(callback_data.arg), MAX_EXPORT_DAYS)
         start = now - timedelta(days=days)
-        label = f"за {days} дн."
+        label = t("admin.export.period_days", staff_lang, days=days)
     else:
-        await alert(callback, "Некорректный период.")
+        await alert(callback, t("admin.export.invalid_period", staff_lang))
         return
 
     end = now + timedelta(days=3650)
+    branch_ids = await resolve_accessible_branch_ids(
+        session, tenant_id, staff, is_super_admin=is_super_admin
+    )
     payload = await ExportService(session, settings, tenant_id).appointments_csv(
-        start=start, end=end
+        start=start, end=end, branch_ids=branch_ids
     )
     filename = f"appointments_{now.strftime('%Y%m%d_%H%M')}.csv"
     document = BufferedInputFile(payload, filename=filename)
@@ -168,7 +233,7 @@ async def export_csv(
     if callback.message is not None:
         await callback.message.answer_document(
             document,
-            caption=f"📥 Экспорт записей ({label})",
-            reply_markup=back_to_admin_kb("menu"),
+            caption=t("admin.export.caption", staff_lang, label=label),
+            reply_markup=back_to_admin_kb(staff_lang, "menu"),
         )
-    await callback.answer("Файл отправлен")
+    await callback.answer(t("admin.export.sent_toast", staff_lang))

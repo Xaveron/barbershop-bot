@@ -24,7 +24,12 @@ def platform_menu_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def platform_tenants_kb(tenants: list[TenantOverview]) -> InlineKeyboardMarkup:
+def platform_tenants_kb(
+    tenants: list[TenantOverview], page: int = 0, has_next: bool = False
+) -> InlineKeyboardMarkup:
+    """Тот же Previous/Next-паттерн, что и admin-списки (см. Phase 9C §M-6,
+    app/bot/keyboards/admin.py::_paginated) — не второй pagination framework,
+    просто своя callback-фабрика (PlatformCB, не AdmCB)."""
     builder = InlineKeyboardBuilder()
     for tenant in tenants:
         mark = {
@@ -36,9 +41,28 @@ def platform_tenants_kb(tenants: list[TenantOverview]) -> InlineKeyboardMarkup:
             text=f"{mark} {tenant.name}",
             callback_data=PlatformCB(action="tenant", arg=str(tenant.id)),
         )
-    builder.button(text="➕ Создать арендатора", callback_data=PlatformCB(action="create"))
-    builder.row(_back("menu"))
     builder.adjust(1)
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️", callback_data=PlatformCB(action="tenants", arg=str(page - 1)).pack()
+            )
+        )
+    if has_next:
+        navigation.append(
+            InlineKeyboardButton(
+                text="➡️", callback_data=PlatformCB(action="tenants", arg=str(page + 1)).pack()
+            )
+        )
+    if navigation:
+        builder.row(*navigation)
+    builder.row(
+        InlineKeyboardButton(
+            text="➕ Создать арендатора", callback_data=PlatformCB(action="create").pack()
+        )
+    )
+    builder.row(_back("menu"))
     return builder.as_markup()
 
 

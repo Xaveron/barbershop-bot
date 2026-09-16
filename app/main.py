@@ -22,7 +22,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.storage.redis import RedisStorage
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
+from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from app.bot.handlers import build_router
 from app.bot.middlewares import (
@@ -50,13 +50,19 @@ USER_COMMANDS = (
 ADMIN_COMMANDS = (*USER_COMMANDS, BotCommand(command="admin", description="Админ-панель"))
 
 
-async def setup_commands(bot: Bot, settings: Settings) -> None:
-    await bot.set_my_commands(list(USER_COMMANDS), scope=BotCommandScopeDefault())
-    for admin_id in settings.admin_ids:
-        with contextlib.suppress(Exception):
-            await bot.set_my_commands(
-                list(ADMIN_COMMANDS), scope=BotCommandScopeChat(chat_id=admin_id)
-            )
+async def setup_commands(bot: Bot) -> None:
+    """/admin в меню команд видят ВСЕ пользователи этого бота — раньше он
+    показывался только legacy ADMIN_ID (settings.admin_ids), одинаково на
+    КАЖДОМ арендаторском боте процесса, что подразумевало один глобальный
+    админ вместо RBAC конкретного арендатора (Phase 9E §16). Показ пункта
+    меню — не авторизация: реальный доступ по-прежнему проверяют
+    IsStaff/RequirePermission (app/bot/middlewares/permissions.py) при
+    нажатии, ровно как сегодня для вручную набранного /admin. Полная
+    персонализация (скрывать /admin от не-сотрудников, показывать на языке
+    пользователя) потребовала бы динамической per-chat регистрации на
+    каждое обновление контекста — отдельная, более крупная задача, см.
+    Phase 9E §16/§24."""
+    await bot.set_my_commands(list(ADMIN_COMMANDS), scope=BotCommandScopeDefault())
 
 
 def _build_storage(settings: Settings) -> MemoryStorage | RedisStorage:
@@ -109,7 +115,7 @@ def _build_bot(token: str, session: BaseSession | None) -> Bot:
     return bot
 
 
-async def _validate_bots(bots: list[Bot], settings: Settings) -> list[Bot]:
+async def _validate_bots(bots: list[Bot]) -> list[Bot]:
     """Проверяет каждый bot независимо: невалидный токен исключает только
     этот bot (его арендатор останется без обслуживания), а не весь процесс —
     один сломанный bot не должен положить остальных арендаторов."""
@@ -126,7 +132,7 @@ async def _validate_bots(bots: list[Bot], settings: Settings) -> list[Bot]:
             logger.error("Telegram API недоступен для bot_id=%s: %s", bot.id, error)
             continue
         logger.info("Бот запущен: @%s (id=%s)", me.username, bot.id)
-        await setup_commands(bot, settings)
+        await setup_commands(bot)
         validated.append(bot)
     return validated
 
@@ -221,7 +227,7 @@ async def run() -> None:
 
     scheduler = None
     try:
-        validated_tenant_bots = await _validate_bots(tenant_bots, settings)
+        validated_tenant_bots = await _validate_bots(tenant_bots)
         validated_platform_bot = (
             await _validate_platform_bot(platform_bot) if platform_bot is not None else None
         )

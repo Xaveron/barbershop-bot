@@ -74,9 +74,16 @@ class TenantManagementService:
         self.tenants = TenantRepository(session)
 
     # --- Обзор -------------------------------------------------------------
-    async def list_tenants(self) -> list[TenantOverview]:
-        tenants = await self.tenants.list_all()
+    async def list_tenants(
+        self, *, limit: int | None = None, offset: int = 0
+    ) -> list[TenantOverview]:
+        """limit=None — полный список; limit задан — одна страница
+        платформенного списка (см. Phase 9C §M-6)."""
+        tenants = await self.tenants.list_all(limit=limit, offset=offset)
         return await self._build_overviews(tenants)
+
+    async def count_tenants(self) -> int:
+        return await self.tenants.count_all()
 
     async def get_tenant(self, tenant_id: uuid.UUID) -> TenantOverview | None:
         tenant = await self.tenants.get(tenant_id)

@@ -87,6 +87,10 @@ SHARED_KEYS = {
     "billing.limit_line_unlimited",
     "billing.feature_line_on",
     "billing.feature_line_off",
+    "admin.common.edit_field_prompt",
+    "admin.staff.card_title",
+    "admin.schedule.hours_saved",
+    "admin.schedule.exc_row",
 }
 
 

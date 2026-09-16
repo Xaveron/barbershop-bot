@@ -8,10 +8,12 @@ from app.bot.handlers.admin import (
     billing,
     branches,
     editing,
+    language,
     menu,
     reports,
     schedule,
     services,
+    settings,
     staff,
 )
 from app.bot.middlewares.permissions import IsStaff
@@ -30,6 +32,8 @@ def build_admin_router() -> Router:
     router.include_router(barbers.router)
     router.include_router(branches.router)
     router.include_router(staff.router)
+    router.include_router(settings.router)
+    router.include_router(language.router)
     router.include_router(schedule.router)
     router.include_router(appointments.router)
     router.include_router(reports.router)

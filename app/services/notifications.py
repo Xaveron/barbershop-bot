@@ -15,7 +15,7 @@ from aiogram.exceptions import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bot.i18n import normalize_language, t
+from app.bot.i18n import t
 from app.config import Settings
 from app.database.models import (
     Appointment,
@@ -24,9 +24,10 @@ from app.database.models import (
     Notification,
     NotificationKind,
 )
-from app.database.repositories import NotificationRepository, UserRepository
+from app.database.repositories import NotificationRepository, StaffRepository, UserRepository
 from app.services.billing import EntitlementService
 from app.services.formatting import appointment_card
+from app.services.locale import get_tenant_default_language, resolve_customer_locale
 from app.utils.dt import now_utc
 from app.utils.text import esc
 
@@ -38,9 +39,12 @@ REMINDER_KEYS: dict[NotificationKind, str] = {
 }
 
 
-def client_language(appointment: Appointment, settings: Settings) -> str:
-    """Язык клиента: напоминания и уведомления приходят на нём."""
-    return normalize_language(appointment.user.language_code, settings.default_language)
+def client_language(appointment: Appointment, tenant_default_language: str) -> str:
+    """Язык клиента: напоминания и уведомления приходят на нём. Резолвится
+    через User.language_code -> tenant_default_language -> FALLBACK (Phase
+    9E §13) — settings.default_language (процесс-wide) здесь больше не
+    участвует, см. app/services/locale.py."""
+    return resolve_customer_locale(appointment.user, tenant_default_language)
 
 
 class NotificationService:
@@ -79,6 +83,13 @@ class NotificationService:
                 return sent, errors
             repository = NotificationRepository(session)
             users = UserRepository(session, self.tenant_id)
+            # Один запрос на весь батч (не на каждое напоминание) — тот же
+            # tenant_id обслуживает весь dispatch_due (Phase 9E §14): язык
+            # клиента резолвится через appointment.user, а этот дефолт нужен
+            # ему только как fallback, если у клиента ничего не сохранено.
+            tenant_default_language = await get_tenant_default_language(
+                session, self.tenant_id
+            )
             try:
                 due = await repository.list_due(
                     now=now_utc(), tenant_id=self.tenant_id, limit=batch_size
@@ -88,7 +99,8 @@ class NotificationService:
                     try:
                         async with session.begin_nested():
                             delivered = await self._deliver(
-                                notification, appointment, repository, users
+                                notification, appointment, repository, users,
+                                tenant_default_language,
                             )
                         if delivered:
                             sent += 1
@@ -112,9 +124,12 @@ class NotificationService:
         appointment: Appointment,
         repository: NotificationRepository,
         users: UserRepository,
+        tenant_default_language: str,
     ) -> bool:
         if notification.kind == NotificationKind.RETURN_REMINDER:
-            return await self._deliver_return(notification, appointment, repository, users)
+            return await self._deliver_return(
+                notification, appointment, repository, users, tenant_default_language
+            )
 
         # Защитные проверки: очередь могла пережить отмену записи или блокировку бота.
         if appointment.status is not AppointmentStatus.CONFIRMED:
@@ -130,7 +145,7 @@ class NotificationService:
             await repository.mark_failed(notification, error="user blocked the bot")
             return False
 
-        lang = client_language(appointment, self.settings)
+        lang = client_language(appointment, tenant_default_language)
         text = (
             f"{t(REMINDER_KEYS[notification.kind], lang)}\n\n"
             f"{appointment_card(appointment, appointment.branch.tz)}\n\n"
@@ -161,12 +176,13 @@ class NotificationService:
         appointment: Appointment,
         repository: NotificationRepository,
         users: UserRepository,
+        tenant_default_language: str,
     ) -> bool:
         if appointment.user.is_blocked:
             await repository.mark_failed(notification, error="user blocked the bot")
             return False
 
-        lang = client_language(appointment, self.settings)
+        lang = client_language(appointment, tenant_default_language)
         weeks = self.settings.return_reminder_weeks
         text = t("notify.return_reminder", lang, weeks=weeks, shop=esc(self.settings.shop_name))
         try:
@@ -190,17 +206,38 @@ class NotificationService:
 
     # --- Уведомления администраторам ---------------------------------------
     async def notify_admins(self, text: str) -> None:
-        for admin_id in self.settings.admin_ids:
+        """Уведомляет активных TENANT_OWNER/TENANT_ADMIN ЭТОГО арендатора —
+        не settings.admin_ids (Phase 9A §C-2: ADMIN_ID/global admin list
+        никогда не участвует в бизнес-уведомлениях конкретного арендатора,
+        см. docs/PLATFORM_CONTROL_PLANE.md про self-terminating bootstrap
+        ADMIN_ID). Пустой список получателей — безопасный no-op."""
+        async with self.session_factory() as session:
+            recipients = await StaffRepository(
+                session, self.tenant_id
+            ).list_notification_recipients()
+        if not recipients:
+            logger.debug(
+                "Нет активных владельцев/админов для уведомления арендатора %s", self.tenant_id
+            )
+            return
+        for staff in recipients:
             try:
-                await self.bot.send_message(admin_id, text)
+                await self.bot.send_message(staff.telegram_id, text)
             except TelegramRetryAfter as exc:  # pragma: no cover - зависит от Telegram
                 await asyncio.sleep(min(exc.retry_after, 30))
             except (TelegramForbiddenError, TelegramBadRequest, TelegramNetworkError) as exc:
-                logger.warning("Не удалось уведомить администратора %s: %s", admin_id, exc)
+                logger.warning(
+                    "Не удалось уведомить сотрудника %s: %s", staff.telegram_id, exc
+                )
 
     async def notify_new_appointment(self, appointment: Appointment) -> None:
-        # Администратору пишем на языке барбершопа (DEFAULT_LANGUAGE).
-        lang = self.settings.default_language
+        # Администратору/владельцу пишем на языке арендатора (Tenant.
+        # default_language), а не process-wide settings.default_language
+        # (Phase 9E §12) — рассылка на N получателей одним текстом, поэтому
+        # это дефолт арендатора, а не персональный язык конкретного
+        # сотрудника (см. app/services/locale.py).
+        async with self.session_factory() as session:
+            lang = await get_tenant_default_language(session, self.tenant_id)
         text = (
             f"{t('notify.new_appointment', lang)}\n\n"
             f"{appointment_card(appointment, appointment.branch.tz, lang=lang)}\n\n"
@@ -211,7 +248,8 @@ class NotificationService:
         await self.notify_admins(text)
 
     async def notify_cancelled(self, appointment: Appointment, *, by_client: bool) -> None:
-        lang = self.settings.default_language
+        async with self.session_factory() as session:
+            lang = await get_tenant_default_language(session, self.tenant_id)
         key = "notify.cancelled_by_client" if by_client else "notify.cancelled_by_admin"
         text = (
             f"{t(key, lang)}\n\n"

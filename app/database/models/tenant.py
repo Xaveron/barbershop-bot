@@ -39,6 +39,14 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     currency: Mapped[str] = mapped_column(
         String(3), nullable=False, default="MDL", server_default="MDL"
     )
+    # Дефолт языка для будущих сотрудников/клиентов этого арендатора, а не
+    # authoritative значение поверх уже сохранённых StaffMember.language /
+    # User.language_code (см. Phase 9E, app/services/locale.py). "ru" —
+    # верифицированный текущий эффективный дефолт приложения (DEFAULT_LANGUAGE
+    # в .env/Settings), которым бэкфилятся существующие арендаторы в 0013.
+    default_language: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="ru", server_default="ru"
+    )
     shop_name: Mapped[str | None] = mapped_column(String(255))
     shop_address: Mapped[str | None] = mapped_column(Text)
     shop_phone: Mapped[str | None] = mapped_column(String(32))

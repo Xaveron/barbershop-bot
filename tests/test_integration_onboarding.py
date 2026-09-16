@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
+from aiogram import Bot
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.types import Chat, Message, Update
+from aiogram.types import User as TgUser
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from app.bot.states import OnboardingSG
 from app.config import Settings
 from app.database import build_engine, build_session_factory
 from app.database.models import (
@@ -30,6 +36,7 @@ from app.database.models import (
     Role,
     Service,
     StaffMember,
+    TelegramBotIdentity,
     Tenant,
     TenantStatus,
     User,
@@ -48,6 +55,7 @@ from app.services.booking import BookingError, BookingService
 from app.services.onboarding import TenantOnboardingService
 from app.services.schedule import ScheduleService
 from app.utils.dt import combine_local, now_utc
+from tests.conftest import MockedSession
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
@@ -290,6 +298,194 @@ async def test_branch_created_during_onboarding_is_tenant_isolated(session_facto
     finally:
         async with session_factory() as session:
             await session.execute(delete(Tenant).where(Tenant.id == other_id))
+            await session.commit()
+
+
+# --- C2. Онбординг через BranchProvisioningService (Phase 9B §M-5) ---------
+# set_branch_currency теперь создаёт первый филиал через
+# BranchProvisioningService (единая точка проверки MAX_BRANCHES), а не через
+# голый BranchRepository — проверяем это через реальный Dispatcher, а не
+# только вызовом сервиса напрямую (это уже покрыто test_integration_billing.py).
+async def _bind_bot(session_factory, tenant_id: uuid.UUID, bot_id: int) -> None:
+    async with session_factory() as session:
+        session.add(
+            TelegramBotIdentity(tenant_id=tenant_id, telegram_bot_id=bot_id, username="ob_bot")
+        )
+        await session.commit()
+
+
+async def _seed_branch_currency_state(
+    dispatcher, bot: Bot, user_id: int, *, branch_name: str, branch_timezone: str | None
+) -> None:
+    key = StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id)
+    state = FSMContext(storage=dispatcher.storage, key=key)
+    await state.set_state(OnboardingSG.branch_currency)
+    await state.update_data(branch_name=branch_name, branch_timezone=branch_timezone)
+
+
+def _bot(bot_id: int) -> Bot:
+    bot = Bot(token=f"{bot_id}:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw", session=MockedSession())
+    bot.calls = bot.session.calls
+    return bot
+
+
+def _make_message(text: str, user_id: int) -> Message:
+    return Message(
+        message_id=1, date=datetime.now(),
+        chat=Chat(id=user_id, type="private"),
+        from_user=TgUser(id=user_id, is_bot=False, first_name="Тест"),
+        text=text,
+    )
+
+
+async def _feed(dispatcher, bot: Bot, message: Message) -> list[tuple[str, str | None]]:
+    bot.calls.clear()
+    await dispatcher.feed_update(bot, Update(update_id=1, message=message))
+    return list(bot.calls)
+
+
+_next_ob_bot_id = iter(range(950_000_001, 950_100_000))
+
+
+async def test_onboarding_creates_first_branch_via_provisioning_service(
+    flow_dispatcher, flow_session_factory
+):
+    tenant_id = None
+    async with flow_session_factory() as session:
+        tenant = await TenantOnboardingService.create_tenant(
+            session, name="Prov Tenant", slug=f"prov-{uuid.uuid4().hex[:8]}"
+        )
+        tenant_id = tenant.id
+    bot_id = next(_next_ob_bot_id)
+    await _bind_bot(flow_session_factory, tenant_id, bot_id)
+    user_id = 700_900_001
+    bot = _bot(bot_id)
+    try:
+        await _seed_branch_currency_state(
+            flow_dispatcher, bot, user_id, branch_name="Main", branch_timezone=None
+        )
+        calls = await _feed(flow_dispatcher, bot, _make_message("-", user_id))
+        assert any("услуг" in (text or "").lower() for _, text in calls)
+
+        async with flow_session_factory() as session:
+            branches = await BranchRepository(session, tenant_id).list_active()
+        assert len(branches) == 1
+        assert branches[0].name == "Main"
+    finally:
+        async with flow_session_factory() as session:
+            await session.execute(delete(Tenant).where(Tenant.id == tenant_id))
+            await session.commit()
+
+
+async def test_onboarding_branch_creation_respects_max_branches_limit(
+    flow_dispatcher, flow_session_factory
+):
+    """Если к моменту этого шага у арендатора уже есть филиал на пределе
+    лимита тарифа (Free: MAX_BRANCHES=1) — второй не должен молча
+    создаться в обход лимита."""
+    async with flow_session_factory() as session:
+        tenant = await TenantOnboardingService.create_tenant(
+            session, name="AtLimit Tenant", slug=f"atlimit-{uuid.uuid4().hex[:8]}"
+        )
+        tenant_id = tenant.id
+        # Уже есть 1 активный филиал — Free-план это исчерпывает.
+        await BranchRepository(session, tenant_id).create(name="Existing")
+        await session.commit()
+
+    bot_id = next(_next_ob_bot_id)
+    await _bind_bot(flow_session_factory, tenant_id, bot_id)
+    user_id = 700_900_002
+    bot = _bot(bot_id)
+    try:
+        await _seed_branch_currency_state(
+            flow_dispatcher, bot, user_id, branch_name="Second", branch_timezone=None
+        )
+        calls = await _feed(flow_dispatcher, bot, _make_message("-", user_id))
+        assert any("лимит" in (text or "").lower() for _, text in calls)
+
+        async with flow_session_factory() as session:
+            branches = await BranchRepository(session, tenant_id).list_active()
+        # Всё ещё ровно один филиал — второй не создан в обход лимита.
+        assert len(branches) == 1
+        assert branches[0].name == "Existing"
+    finally:
+        async with flow_session_factory() as session:
+            await session.execute(delete(Tenant).where(Tenant.id == tenant_id))
+            await session.commit()
+
+
+async def test_onboarding_branch_creation_is_tenant_isolated_under_dispatcher(
+    flow_dispatcher, flow_session_factory
+):
+    """Арендатор A на пределе лимита не мешает арендатору B создать свой
+    первый филиал через тот же обработчик."""
+    async with flow_session_factory() as session:
+        tenant_a = await TenantOnboardingService.create_tenant(
+            session, name="A", slug=f"a-{uuid.uuid4().hex[:8]}"
+        )
+        tenant_a_id = tenant_a.id
+        await BranchRepository(session, tenant_a_id).create(name="A-Existing")
+        tenant_b = await TenantOnboardingService.create_tenant(
+            session, name="B", slug=f"b-{uuid.uuid4().hex[:8]}"
+        )
+        tenant_b_id = tenant_b.id
+        await session.commit()
+
+    bot_a_id, bot_b_id = next(_next_ob_bot_id), next(_next_ob_bot_id)
+    await _bind_bot(flow_session_factory, tenant_a_id, bot_a_id)
+    await _bind_bot(flow_session_factory, tenant_b_id, bot_b_id)
+    user_id = 700_900_003
+    bot_b = _bot(bot_b_id)
+    try:
+        await _seed_branch_currency_state(
+            flow_dispatcher, bot_b, user_id, branch_name="B-Main", branch_timezone=None
+        )
+        calls = await _feed(flow_dispatcher, bot_b, _make_message("-", user_id))
+        assert not any("лимит" in (text or "").lower() for _, text in calls)
+
+        async with flow_session_factory() as session:
+            branches_b = await BranchRepository(session, tenant_b_id).list_active()
+        assert len(branches_b) == 1
+        assert branches_b[0].name == "B-Main"
+    finally:
+        async with flow_session_factory() as session:
+            await session.execute(
+                delete(Tenant).where(Tenant.id.in_((tenant_a_id, tenant_b_id)))
+            )
+            await session.commit()
+
+
+async def test_onboarding_branch_creation_no_duplicate_on_retry(
+    flow_dispatcher, flow_session_factory
+):
+    """После успешного создания первого филиала состояние уходит с
+    branch_currency (на следующий шаг мастера) — повторная отправка того же
+    сообщения не должна создать второй филиал."""
+    async with flow_session_factory() as session:
+        tenant = await TenantOnboardingService.create_tenant(
+            session, name="Retry Tenant", slug=f"retry-{uuid.uuid4().hex[:8]}"
+        )
+        tenant_id = tenant.id
+    bot_id = next(_next_ob_bot_id)
+    await _bind_bot(flow_session_factory, tenant_id, bot_id)
+    user_id = 700_900_004
+    bot = _bot(bot_id)
+    try:
+        await _seed_branch_currency_state(
+            flow_dispatcher, bot, user_id, branch_name="Once", branch_timezone=None
+        )
+        await _feed(flow_dispatcher, bot, _make_message("-", user_id))
+        # Повторная отправка того же текста: состояние уже не branch_currency,
+        # поэтому попадает в другой хендлер (следующий шаг мастера), а не
+        # создаёт второй филиал.
+        await _feed(flow_dispatcher, bot, _make_message("-", user_id))
+
+        async with flow_session_factory() as session:
+            branches = await BranchRepository(session, tenant_id).list_active()
+        assert len(branches) == 1
+    finally:
+        async with flow_session_factory() as session:
+            await session.execute(delete(Tenant).where(Tenant.id == tenant_id))
             await session.commit()
 
 

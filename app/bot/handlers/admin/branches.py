@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.billing_ui import describe_billing_error
+from app.bot.i18n import t
 from app.bot.keyboards.admin import admin_branch_kb, admin_branches_kb, back_to_admin_kb
 from app.bot.keyboards.callbacks import AdmCB
 from app.bot.middlewares.permissions import RequirePermission
@@ -28,34 +29,56 @@ router = Router(name="admin-branches")
 router.message.filter(RequirePermission(Permission.MANAGE_BRANCHES))
 router.callback_query.filter(RequirePermission(Permission.MANAGE_BRANCHES))
 
+PAGE_SIZE = 8
 
-def branch_card(branch: Branch) -> tuple[str, InlineKeyboardMarkup]:
+
+def branch_card(branch: Branch, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    status = (
+        t("admin.branch.status_active", lang)
+        if branch.is_active
+        else t("admin.branch.status_hidden", lang)
+    )
     text = (
         f"📍 <b>{esc(branch.name)}</b>\n\n"
         f"📝 {esc(branch.address or '—')}\n"
-        f"👁 Статус: {'активен' if branch.is_active else 'скрыт'}"
+        f"{t('admin.branch.card_status', lang, status=status)}"
     )
-    return text, admin_branch_kb(branch)
+    return text, admin_branch_kb(branch, lang)
 
 
 async def branches_list(
-    session: AsyncSession, tenant_id: uuid.UUID
+    session: AsyncSession, tenant_id: uuid.UUID, lang: str, page: int = 0
 ) -> tuple[str, InlineKeyboardMarkup]:
-    branches = await BranchRepository(session, tenant_id).list_all()
+    """Пагинированный admin-список (см. Phase 9C §M-6) — отдельно от
+    BranchRepository.list_active(), которым продолжают пользоваться
+    operational-пикеры (schedule/exceptions/booking): им нужны ВСЕ активные
+    филиалы разом, а не одна страница."""
+    repository = BranchRepository(session, tenant_id)
+    total = await repository.count_all()
+    branches = await repository.list_all(limit=PAGE_SIZE, offset=page * PAGE_SIZE)
+    if not branches and page > 0:
+        return await branches_list(session, tenant_id, lang, 0)
     if not branches:
-        return "📍 Филиалов пока нет. Добавьте первый.", admin_branches_kb(branches)
-    lines = ["📍 <b>Филиалы</b>\n"]
+        return t("admin.branches.empty", lang), admin_branches_kb(branches, lang, page, False)
+    lines = [t("admin.branches.list_title", lang, total=total) + "\n"]
     for branch in branches:
         lines.append(f"{'✅' if branch.is_active else '🚫'} {esc(branch.name)}")
-    return "\n".join(lines), admin_branches_kb(branches)
+    has_next = (page + 1) * PAGE_SIZE < total
+    return "\n".join(lines), admin_branches_kb(branches, lang, page, has_next)
 
 
 @router.callback_query(AdmCB.filter(F.action == "branches"))
 async def show_branches(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     await state.clear()
-    text, markup = await branches_list(session, tenant_id)
+    page = int(callback_data.arg) if callback_data.arg.isdigit() else 0
+    text, markup = await branches_list(session, tenant_id, staff_lang, page)
     await edit_message(callback, text, markup)
     await callback.answer()
 
@@ -67,47 +90,54 @@ async def show_branch(
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     await state.clear()
     branch = await _get_branch(callback_data.arg, session, tenant_id)
     if branch is None:
-        await alert(callback, "Филиал не найден.")
+        await alert(callback, t("admin.branch.not_found", staff_lang))
         return
-    text, markup = branch_card(branch)
+    text, markup = branch_card(branch, staff_lang)
     await edit_message(callback, text, markup)
     await callback.answer()
 
 
 @router.callback_query(AdmCB.filter(F.action == "brh_add"))
-async def add_branch_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def add_branch_start(callback: CallbackQuery, state: FSMContext, staff_lang: str) -> None:
     await state.clear()
     await state.set_state(AdminBranchSG.name)
     await edit_message(
         callback,
-        "➕ <b>Новый филиал</b>\n\nШаг 1/2. Отправьте название филиала.\nДля отмены: /cancel",
-        back_to_admin_kb("branches"),
+        t("admin.branch.add_title", staff_lang),
+        back_to_admin_kb(staff_lang, "branches"),
     )
     await callback.answer()
 
 
 @router.message(AdminBranchSG.name)
-async def add_branch_name(message: Message, state: FSMContext) -> None:
+async def add_branch_name(message: Message, state: FSMContext, staff_lang: str) -> None:
     try:
-        name = validate_name(message.text or "", field="Название")
+        name = validate_name(
+            message.text or "", lang=staff_lang, field=t("admin.settings.field_name", staff_lang)
+        )
     except ValidationError as exc:
         await message.answer(f"⚠️ {esc(exc)}")
         return
     await state.update_data(name=name)
     await state.set_state(AdminBranchSG.address)
-    await message.answer("Шаг 2/2. Адрес филиала (или «-», чтобы пропустить)")
+    await message.answer(t("admin.branch.add_step2", staff_lang))
 
 
 @router.message(AdminBranchSG.address)
 async def add_branch_address(
-    message: Message, state: FSMContext, session: AsyncSession, tenant_id: uuid.UUID, lang: str
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     try:
-        address = validate_description(message.text or "")
+        address = validate_description(message.text or "", lang=staff_lang)
     except ValidationError as exc:
         await message.answer(f"⚠️ {esc(exc)}")
         return
@@ -120,59 +150,70 @@ async def add_branch_address(
         await session.commit()
     except BillingError as exc:
         await session.rollback()
-        await message.answer(f"⚠️ {describe_billing_error(exc, lang)}")
+        await message.answer(f"⚠️ {describe_billing_error(exc, staff_lang)}")
         return
     except Exception:
         await session.rollback()
         logger.exception("Не удалось создать филиал")
-        await message.answer("⚠️ Не удалось создать филиал.")
+        await message.answer(t("admin.branch.create_failed", staff_lang))
         return
-    text, markup = branch_card(branch)
-    await message.answer("✅ Филиал создан.\n\n" + text, reply_markup=markup)
+    text, markup = branch_card(branch, staff_lang)
+    await message.answer(t("admin.branch.created", staff_lang) + text, reply_markup=markup)
 
 
-_FIELD_PROMPTS = {
-    "brh_name": ("name", "Отправьте новое название филиала."),
-    "brh_addr": ("address", "Отправьте новый адрес (или «-», чтобы очистить)."),
+_FIELD_PROMPT_KEYS = {
+    "brh_name": ("name", "admin.branch.prompt_name"),
+    "brh_addr": ("address", "admin.branch.prompt_address"),
 }
 
 
-@router.callback_query(AdmCB.filter(F.action.in_(set(_FIELD_PROMPTS))))
+@router.callback_query(AdmCB.filter(F.action.in_(set(_FIELD_PROMPT_KEYS))))
 async def edit_branch_field(
     callback: CallbackQuery,
     callback_data: AdmCB,
     state: FSMContext,
     session: AsyncSession,
     tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     branch = await _get_branch(callback_data.arg, session, tenant_id)
     if branch is None:
-        await alert(callback, "Филиал не найден.")
+        await alert(callback, t("admin.branch.not_found", staff_lang))
         return
-    field, prompt = _FIELD_PROMPTS[callback_data.action]
+    field, prompt_key = _FIELD_PROMPT_KEYS[callback_data.action]
     await state.set_state(AdminFieldSG.value)
     await state.update_data(entity="branch", field=field, entity_id=str(branch.id))
     await edit_message(
         callback,
-        f"✏️ {esc(branch.name)}\n\n{prompt}\n\nДля отмены: /cancel",
-        back_to_admin_kb("brh", str(branch.id)),
+        t(
+            "admin.common.edit_field_prompt",
+            staff_lang,
+            name=esc(branch.name),
+            prompt=t(prompt_key, staff_lang),
+            cancel_hint=t("admin.common.cancel_hint", staff_lang),
+        ),
+        back_to_admin_kb(staff_lang, "brh", str(branch.id)),
     )
     await callback.answer()
 
 
 @router.callback_query(AdmCB.filter(F.action == "brh_toggle"))
 async def toggle_branch(
-    callback: CallbackQuery, callback_data: AdmCB, session: AsyncSession, tenant_id: uuid.UUID
+    callback: CallbackQuery,
+    callback_data: AdmCB,
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    staff_lang: str,
 ) -> None:
     branch = await _get_branch(callback_data.arg, session, tenant_id)
     if branch is None:
-        await alert(callback, "Филиал не найден.")
+        await alert(callback, t("admin.branch.not_found", staff_lang))
         return
     branch.is_active = not branch.is_active
     await session.commit()
-    text, markup = branch_card(branch)
+    text, markup = branch_card(branch, staff_lang)
     await edit_message(callback, text, markup)
-    await callback.answer("Статус обновлён")
+    await callback.answer(t("admin.common.status_updated", staff_lang))
 
 
 async def _get_branch(raw_id: str, session: AsyncSession, tenant_id: uuid.UUID) -> Branch | None:

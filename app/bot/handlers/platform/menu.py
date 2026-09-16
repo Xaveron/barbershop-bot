@@ -34,6 +34,7 @@ router.message.filter(RequirePlatformOperator())
 router.callback_query.filter(RequirePlatformOperator())
 
 PLATFORM_MENU_TEXT = "🛠 <b>Платформа</b>\n\nВыберите раздел:"
+TENANTS_PAGE_SIZE = 8
 
 
 @router.message(Command("platform"))
@@ -66,16 +67,29 @@ def _tenant_card_text(overview: TenantOverview) -> str:
 
 
 @router.callback_query(PlatformCB.filter(F.action == "tenants"))
-async def show_tenants(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+async def show_tenants(
+    callback: CallbackQuery, callback_data: PlatformCB, state: FSMContext, session: AsyncSession
+) -> None:
     await state.clear()
-    overviews = await TenantManagementService(session).list_tenants()
+    page = int(callback_data.arg) if callback_data.arg.isdigit() else 0
+    service = TenantManagementService(session)
+    total = await service.count_tenants()
+    overviews = await service.list_tenants(limit=TENANTS_PAGE_SIZE, offset=page * TENANTS_PAGE_SIZE)
+    if not overviews and page > 0:
+        # Страница за пределами данных (арендатор удалён/список изменился
+        # между запросами) — откатываемся на первую (см. Phase 9C §M-6).
+        await show_tenants(
+            callback, PlatformCB(action="tenants", arg="0"), state, session
+        )
+        return
     if not overviews:
         text = "🏢 Арендаторов пока нет."
     else:
-        text = "🏢 <b>Арендаторы</b>\n\n" + "\n".join(
+        text = f"🏢 <b>Арендаторы</b> (всего {total})\n\n" + "\n".join(
             f"• {esc(o.name)} ({o.status.value})" for o in overviews
         )
-    await edit_message(callback, text, platform_tenants_kb(overviews))
+    has_next = (page + 1) * TENANTS_PAGE_SIZE < total
+    await edit_message(callback, text, platform_tenants_kb(overviews, page, has_next))
     await callback.answer()
 
 

@@ -351,6 +351,7 @@ async def reschedule_confirm(
     session_factory: async_sessionmaker[AsyncSession],
     is_admin: bool,
     lang: str,
+    tenant_default_language: str,
 ) -> None:
     data = await state.get_data()
     appointment_id = parse_uuid(data.get("appointment_id", ""))
@@ -393,7 +394,7 @@ async def reschedule_confirm(
 
     notifier = NotificationService(bot, session_factory, settings, tenant_id)
     if by_admin:
-        client_lang = client_language(appointment, settings)
+        client_lang = client_language(appointment, tenant_default_language)
         await notifier.notify_client(
             appointment.user.telegram_id,
             t("appointments.moved_by_shop", client_lang)
@@ -403,7 +404,7 @@ async def reschedule_confirm(
             + t("appointments.questions", client_lang, phone=esc(settings.shop_phone)),
         )
     else:
-        admin_lang = settings.default_language
+        admin_lang = tenant_default_language
         await notifier.notify_admins(
             t("notify.client_moved", admin_lang)
             + "\n\n"

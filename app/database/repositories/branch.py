@@ -35,13 +35,23 @@ class BranchRepository(TenantScopedRepository):
         )
         return list(await self.session.scalars(stmt))
 
-    async def list_all(self) -> list[Branch]:
+    async def list_all(self, *, limit: int | None = None, offset: int = 0) -> list[Branch]:
+        """limit=None — полный список (для operational-пикеров, которым
+        нужны ВСЕ филиалы, не одна страница); limit задан — одна страница
+        admin-списка (см. Phase 9C §M-6). id как tie-breaker гарантирует
+        стабильный порядок между страницами."""
         stmt = (
             select(Branch)
             .where(Branch.tenant_id == self.tenant_id)
-            .order_by(Branch.is_active.desc(), Branch.name)
+            .order_by(Branch.is_active.desc(), Branch.name, Branch.id)
         )
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
         return list(await self.session.scalars(stmt))
+
+    async def count_all(self) -> int:
+        stmt = select(func.count()).select_from(Branch).where(Branch.tenant_id == self.tenant_id)
+        return await self.session.scalar(stmt) or 0
 
     async def create(
         self,
